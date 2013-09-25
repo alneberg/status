@@ -68,6 +68,7 @@ from status.sequencing import InstrumentUnmatchedPlotHandler
 from status.sequencing import InstrumentYieldDataHandler
 from status.sequencing import InstrumentYieldPlotHandler
 
+from status.kpi import ProjectDatesDataHandler
 from status.testing import TestDataHandler
 from status.util import dthandler
 
@@ -1021,6 +1022,7 @@ class Application(tornado.web.Application):
             ("/api/v1/test/(\w+)?", TestDataHandler),
             ("/api/v1/uppmax_projects", UppmaxProjectsDataHandler),
             ("/api/v1/phix_err_rate", PhixErrorRateDataHandler),
+            ("/api/v1/project_dates", ProjectDatesDataHandler),
             ("/amanita", AmanitaHandler),
             ("/applications", ApplicationsHandler),
             ("/application/([^/]*)$", ApplicationHandler),
