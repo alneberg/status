@@ -1146,3 +1146,96 @@ class PrioProjectsTableHandler(SafeHandler):
                 delta = datetime.datetime.now() - dateutil.parser.parse(start_date)
             days = delta.days
         return days
+
+
+class ProjectsDatesPlotHandler(SafeHandler):
+    """Serves a page where the projects duration plot will be shown"""
+    def get(self):
+        t = self.application.loader.load("projects_dates_plot.html")
+
+        self.write(t.generate(gs_globals=self.application.gs_globals,
+                              user=self.get_current_user()))
+
+class ProjectsDatesPlotDataHandler(ProjectsBaseDataHandler):
+    """Serves the json defining the vega plot for projects_dates_plot.html"""
+    def get(self):
+        import pandas as pd
+        data = pd.DataFrame({'a': list('CCCDDDEEE'),
+                     'b': [2, 7, 4, 1, 2, 6, 8, 4, 7]})
+        import altair as alt
+        chart = alt.Chart(data).mark_boxplot().encode(x='a', y='b')
+
+        projects = self.list_projects()
+        import pdb; pdb.set_trace()
+        self.set_status(200)
+        self.set_header("Content-type", "application/json")
+        self.write(chart.to_json())
+
+    
+    def list_projects(self):
+        projects = OrderedDict()
+        projtype='all'
+
+        def_dates_gen = { 'days_recep_ctrl' : ['open_date', 'queued'],
+                          'days_analysis' : ['all_samples_sequenced', 'best_practice_analysis_completed'],
+                          'days_data_delivery' : ['best_practice_analysis_completed', 'all_raw_data_delivered'],
+                          'days_close' : ['all_raw_data_delivered', 'close_date']
+                         }
+
+        def_dates_summary = { 'days_prep_start' : ['queued', 'library_prep_start'],
+                              'days_seq_start' : [['qc_library_finished', 'queued'], 'sequencing_start_date'],
+                              'days_seq' : ['sequencing_start_date', 'all_samples_sequenced'],
+                              'days_prep' : ['library_prep_start', 'qc_library_finished']
+                             }
+
+        default_start_date=(datetime.datetime.now() - relativedelta(years=1)).strftime("%Y-%m-%d")
+        default_end_date=datetime.datetime.now().strftime("%Y-%m-%d")
+
+        summary_view = self.application.projects_db.view("project/summary_status", descending=True)[['closed', 'Z']:['closed', '']]
+
+        filtered_projects = []
+        default_start_date=(datetime.datetime.now() - relativedelta(years=2)).strftime("%Y-%m-%d")
+
+        for row in summary_view:
+
+            p_info=row.value
+            #aborted projects
+            if ('aborted' in p_info['details'] or ('project_summary' in p_info and 'aborted' in p_info['project_summary'])):
+                continue
+
+            if 'close_date' in p_info and p_info['close_date'] >= str(default_start_date):
+                filtered_projects.append(row)
+
+        final_projects = OrderedDict()
+        for row in filtered_projects:
+            # This is essentially identical to whats in the original list_projects function, should probably deduplicate a bit.
+            row = self.project_summary_data(row)
+            proj_id = row.key[1]
+
+            final_projects[proj_id] = row.value
+            for date_type, date in row.value['summary_dates'].items():
+                final_projects[proj_id][date_type] = date
+
+            for key, value in def_dates_gen.items():
+                start_date = value[0]
+                end_date = value[1]
+                final_projects[proj_id][key] = self._calculate_days_in_status(final_projects[proj_id].get(start_date),
+                                                                                    final_projects[proj_id].get(end_date))
+
+            for key, value in def_dates_summary.items():
+                if key == 'days_seq_start':
+
+                    if 'by user' in final_projects[proj_id].get('library_construction_method', '-').lower():
+                        start_date = value[0][1]
+                    else:
+                        start_date = value[0][0]
+                else:
+                    start_date = value[0]
+                end_date = value[1]
+                if key in ['days_prep', 'days_prep_start'] and 'by user' in final_projects[proj_id].get('library_construction_method', '-').lower():
+                    final_projects[proj_id][key] = '-'
+                else:
+                    final_projects[proj_id][key] = self._calculate_days_in_status(final_projects[proj_id].get(start_date),
+                                                                                            final_projects[proj_id].get(end_date))
+
+        return final_projects
