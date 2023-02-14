@@ -1,0 +1,18 @@
+---
+version: "3.9"
+
+services:
+    backend:
+      container_name: genstat_backend
+      image: genstat-backend-local:latest
+      build:
+        dockerfile: Dockerfiles/backend.Dockerfile
+        context: ./
+      working_dir: /code/run_dir
+      command: sh -c "python ../status_app.py --testing-mode"
+      ports:
+        - 127.0.0.1:5000:5000
+      volumes:
+        - type: bind
+          source: ./status
+          target: /code/status
