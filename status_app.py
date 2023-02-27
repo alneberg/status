@@ -358,6 +358,7 @@ class Application(tornado.web.Application):
         if options['develop']:
             tornado.autoreload.watch("design/application.html")
             tornado.autoreload.watch("design/applications.html")
+            tornado.autoreload.watch("design/barcode.html")
             tornado.autoreload.watch("design/base.html")
             tornado.autoreload.watch("design/base_b5.html")
             tornado.autoreload.watch("design/bioinfo_tab.html")
