@@ -60,7 +60,7 @@ from status.statistics import YearApplicationsProjectHandler, YearApplicationsSa
     ApplicationOpenProjectsHandler, ApplicationOpenSamplesHandler, WeekInstrumentTypeYieldHandler, StatsAggregationHandler, YearDeliverytimeApplicationHandler
 from status.suggestion_box import SuggestionBoxDataHandler, SuggestionBoxHandler
 from status.testing import TestDataHandler
-from status.uppmax import UppmaxDiskUsageHandler
+from status.uppmax import UppmaxDiskUsageHandler, UppmaxDiskUsageDataHandler
 from status.util import BaseHandler, DataHandler, LastPSULRunHandler, MainHandler, \
     UpdatedDocumentsDatahandler
 from status.user_preferences import UserPrefPageHandler, UserPrefPageHandler_b5
@@ -195,6 +195,7 @@ class Application(tornado.web.Application):
             ("/api/v1/deliveries/set_bioinfo_responsible$", DeliveriesPageHandler),
             ("/api/v1/suggestions", SuggestionBoxDataHandler),
             ("/api/v1/test/(\w+)?", TestDataHandler),
+            ("/api/v1/uppmax_disk_usage", UppmaxDiskUsageDataHandler),
             ("/api/v1/user_management/users", UserManagementDataHandler),
             ("/api/v1/workset/([^/]*)$", WorksetDataHandler),
             ("/api/v1/workset_search/([^/]*)$", WorksetSearchHandler),
@@ -394,6 +395,7 @@ class Application(tornado.web.Application):
             tornado.autoreload.watch("design/sensorpush.html")
             tornado.autoreload.watch("design/suggestion_box.html")
             tornado.autoreload.watch("design/unauthorized.html")
+            tornado.autoreload.watch("design/uppmax_disk_usage.html")
             tornado.autoreload.watch("design/user_management.html")
             tornado.autoreload.watch("design/user_preferences.html")
             tornado.autoreload.watch("design/workset_samples.html")
