@@ -60,6 +60,7 @@ from status.statistics import YearApplicationsProjectHandler, YearApplicationsSa
     ApplicationOpenProjectsHandler, ApplicationOpenSamplesHandler, WeekInstrumentTypeYieldHandler, StatsAggregationHandler, YearDeliverytimeApplicationHandler
 from status.suggestion_box import SuggestionBoxDataHandler, SuggestionBoxHandler
 from status.testing import TestDataHandler
+from status.uppmax import UppmaxDiskUsageHandler
 from status.util import BaseHandler, DataHandler, LastPSULRunHandler, MainHandler, \
     UpdatedDocumentsDatahandler
 from status.user_preferences import UserPrefPageHandler, UserPrefPageHandler_b5
@@ -238,6 +239,7 @@ class Application(tornado.web.Application):
             ("/user_management", UserManagementHandler),
             ("/userpref", UserPrefPageHandler),
             ("/userpref_b5", UserPrefPageHandler_b5),
+            ("/uppmax_disk_usage", UppmaxDiskUsageHandler),
             ("/worksets", WorksetsHandler),
             ("/workset_queues", WorksetQueuesHandler),
             ("/workset/([^/]*)$", WorksetHandler),
