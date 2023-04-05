@@ -219,7 +219,10 @@ class MainHandler(UnsafeHandler):
         server_status = sorted(server_status.items(), key = lambda item: item[1].get('used_percentage'), reverse=True)
         # Load presets to populate the projects links
         presets_list = self.get_argument('presets_list', 'pv_presets')
-        user_details=self.get_user_details(self.application, self.get_current_user().email)
+        current_user = self.get_current_user()
+        user_details = {}
+        if current_user:
+            user_details = self.get_user_details(self.application, self.get_current_user().email)
         presets = {
             "default": self.application.genstat_defaults.get(presets_list),
             "user": user_details.get('userpreset')
