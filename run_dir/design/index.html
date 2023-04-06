@@ -8,10 +8,11 @@
 
     {% if not user %}
 
-    <h2> Get Access </h2>
-    <p>To get access to the resources on this site, you first need to log in with the account given to you by your manager.</p>
-    <p><a class="btn btn-primary btn-lg", href="/login">Log in</a></p>
-
+    <div class="mt-4">
+      <h2 class="mt-3">Get Access</h2>
+      <p class="lead fs-4">Login with your SciLifeLab Google-account and ask your manager to activate your Genomics Status account.</p>
+      <p><a class="btn btn-primary btn-lg px-4", href="/login">Login</a></p>
+    </div>
     {% else %}
     <p class="lead" id="updated-status">
     </p>
