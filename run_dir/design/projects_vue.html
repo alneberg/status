@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+<!--
+Template file: projects_vue.html
+URL: /projects_vue
+Title: List projects with Vue
+Description: Shows a table with projects
+-->
+
+{% block stuff %}
+
+<div class="container-xxl" id="projects_list">
+  <h1 class="my-4">Projects</h1>
+  <div id="projects_vue_base_div"></div>
+</div>
+
+<script src="/static/js/projects_vue.js?v={{ gs_globals['git_commit'] }}"></script>
+
+{% end %}

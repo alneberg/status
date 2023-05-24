@@ -46,6 +46,7 @@ from status.projects import CaliperImageHandler, CharonProjectHandler, \
     ProjectTicketsDataHandler, RunningNotesDataHandler, RecCtrlDataHandler, \
     ProjMetaCompareHandler, ProjectRNAMetaDataHandler, FragAnImageHandler, PresetsOnLoadHandler, \
     ImagesDownloadHandler, PrioProjectsTableHandler
+from status.projects_vue import ProjectsVuewHandler
 from status.queues import qPCRPoolsDataHandler, qPCRPoolsHandler, SequencingQueuesDataHandler, SequencingQueuesHandler, \
     WorksetQueuesHandler, WorksetQueuesDataHandler, LibraryPoolingQueuesHandler, LibraryPoolingQueuesDataHandler
 from status.reads_plot import DataFlowcellYieldHandler, FlowcellPlotHandler
@@ -227,6 +228,7 @@ class Application(tornado.web.Application):
             ("/project/([^/]*)$", ProjectSamplesHandler),
             ("/project/(P[^/]*)/([^/]*)$", ProjectSamplesHandler),
             ("/projects", ProjectsHandler),
+            ("/projects_vue", ProjectsVuewHandler)
             ("/proj_meta", ProjMetaCompareHandler),
             ("/reads_total/([^/]*)$", ReadsTotalHandler),
             ("/rec_ctrl_view/([^/]*)$", RecCtrlDataHandler),
