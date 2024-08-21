@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+<!--
+Template file: index_graph.html
+URL: /index_graph
+Title: A graph over indices
+-->
+
+{% block stuff %}
+
+<h1>Welcome to the Index Graph Page</h1>
+<script src="https://code.highcharts.com/highcharts.js"></script>
+<script src="https://code.highcharts.com/modules/networkgraph.js"></script>
+
+<figure class="highcharts-figure" style="min-width: 320px; max-width: 1000px; margin: 1em auto;">
+    <div id="container"></div>
+    <p class="highcharts-description">
+        This force directed graph shows an example of a network graph, where
+        the nodes represent languages and the language families they belong to.
+        The nodes can be dragged around and will be repositioned dynamically.
+        Network graphs are typically used to show relations in data. In this
+        case, we are showing a hierarchical structure.
+    </p>
+</figure>
+
+<script src="/static/js/index_graph.js"></script>
+
+{% end %}

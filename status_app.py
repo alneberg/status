@@ -45,6 +45,7 @@ from status.flowcells import (
     OldFlowcellsInfoDataHandler,
     ReadsTotalHandler,
 )
+from status.index_graph import IndexGraphHandler
 from status.instruments import (
     InstrumentLogsHandler,
     DataInstrumentLogsHandler,
@@ -355,6 +356,7 @@ class Application(tornado.web.Application):
             ("/ont_flowcells_plot", ONTFlowcellPlotHandler),
             ("/data_delivered_plot", DeliveryPlotHandler),
             ("/generate_quote", GenerateQuoteHandler),
+            ("/index_graph", IndexGraphHandler),
             ("/instrument_logs", InstrumentLogsHandler),
             ("/instrument_logs/([^/]*)$", InstrumentLogsHandler),
             ("/invoicing", InvoicingPageHandler),
@@ -544,6 +546,7 @@ class Application(tornado.web.Application):
             tornado.autoreload.watch("design/flowcell_trend_plot.html")
             tornado.autoreload.watch("design/flowcells.html")
             tornado.autoreload.watch("design/index.html")
+            tornado.autoreload.watch("design/index_graph.html")
             tornado.autoreload.watch("design/instrument_logs.html")
             tornado.autoreload.watch("design/invoicing.html")
             tornado.autoreload.watch("design/lanes_ordered.html")
