@@ -538,11 +538,13 @@ class Application(tornado.web.Application):
 
         # Setup the Tornado Application
 
-        settings["debug"] = True
+        settings["debug"] = False
         settings["static_path"] = "static"
         settings["login_url"] = "/login"
 
         if options["develop"]:
+            settings["debug"] = True
+
             tornado.autoreload.watch("design/application.html")
             tornado.autoreload.watch("design/applications.html")
             tornado.autoreload.watch("design/barcode.html")
