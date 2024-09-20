@@ -7,7 +7,6 @@ from genologics.config import BASEURI, USERNAME, PASSWORD
 from genologics import lims
 from genologics.entities import Udfconfig, Project as LIMSProject
 
-lims = lims.Lims(BASEURI, USERNAME, PASSWORD)
 
 
 class DeliveriesPageHandler(SafeHandler):
@@ -18,7 +17,7 @@ class DeliveriesPageHandler(SafeHandler):
             self.set_status(400)
             self.write("no project_id or bioinfo_responsible")
             return
-        lims_project = LIMSProject(lims, id=project_id)
+        lims_project = LIMSProject(self.lims, id=project_id)
         if not lims_project:
             self.set_status(400)
             self.write("lims project not found: {}".format(project_id))
@@ -298,7 +297,7 @@ class DeliveriesPageHandler(SafeHandler):
             ongoing_deliveries[project_id].update(project_data)
         try:
             lims_responsibles = ["unassigned"] + sorted(
-                Udfconfig(lims, id="1128").presets
+                Udfconfig(self.lims, id="1128").presets
             )
         except Exception as e:
             lims_responsibles = ["unassigned"] + sorted(responsible_list)

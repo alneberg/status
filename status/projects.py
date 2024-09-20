@@ -20,8 +20,6 @@ from zenpy import ZenpyException
 from status.util import dthandler, SafeHandler
 from status.running_notes import LatestRunningNoteHandler
 
-
-lims = lims.Lims(BASEURI, USERNAME, PASSWORD)
 application_log = logging.getLogger("tornado.application")
 
 
@@ -734,10 +732,10 @@ class FragAnImageHandler(SafeHandler):
             # can be triggered by the data.get().get() calls.
             self.write("no Fragment Analyzer image found")
         else:
-            self.write(self.get_frag_an_image(data.get(sample).get(step)))
+            self.write(self.get_frag_an_image(data.get(sample).get(step), self.lims))
 
     @staticmethod
-    def get_frag_an_image(url):
+    def get_frag_an_image(url, lims):
         data = lims.get_file_contents(uri=url)
         encoded_string = base64.b64encode(data.read()).decode("utf-8")
         returnHTML = json.dumps(encoded_string)
@@ -767,9 +765,9 @@ class CaliperImageHandler(SafeHandler):
         # url pattern: sftp://ngi-lims-prod.scilifelab.se/home/glsftp/clarity/year/month/processid/artifact-id-file-id.png
         artifact_attached_id = url.rsplit(".", 1)[0].rsplit("/", 1)[1].rsplit("-", 2)[0]
         # Couldn't use fileid in the url directly as it was sometimes wrong
-        caliper_file_id = Artifact(lims=lims, id=artifact_attached_id).files[0].id
+        caliper_file_id = Artifact(lims=self.lims, id=artifact_attached_id).files[0].id
         try:
-            my_file = lims.get_file_contents(id=caliper_file_id)
+            my_file = self.lims.get_file_contents(id=caliper_file_id)
             encoded_string = base64.b64encode(my_file.read()).decode("utf-8")
             returnHTML = json.dumps(encoded_string)
             return returnHTML
@@ -826,7 +824,8 @@ class ImagesDownloadHandler(SafeHandler):
                                     img_file_name,
                                     base64.b64decode(
                                         FragAnImageHandler.get_frag_an_image(
-                                            data[sample][key]
+                                            data[sample][key],
+                                            self.lims
                                         )
                                     ),
                                 )
@@ -836,7 +835,8 @@ class ImagesDownloadHandler(SafeHandler):
                                     img_file_name,
                                     base64.b64decode(
                                         FragAnImageHandler.get_frag_an_image(
-                                            data[sample][key]
+                                            data[sample][key],
+                                            self.lims
                                         )
                                     ),
                                 )
@@ -929,7 +929,7 @@ class LinksDataHandler(SafeHandler):
 
     def get(self, project):
         self.set_header("Content-type", "application/json")
-        p = Project(lims, id=project)
+        p = Project(self.lims, id=project)
         p.get(force=True)
 
         links = json.loads(p.udf["Links"]) if "Links" in p.udf else {}
@@ -954,7 +954,7 @@ class LinksDataHandler(SafeHandler):
             self.set_status(400)
             self.finish("<html><body>Link title and type is required</body></html>")
         else:
-            p = Project(lims, id=project)
+            p = Project(self.lims, id=project)
             p.get(force=True)
             links = json.loads(p.udf["Links"]) if "Links" in p.udf else {}
             links[str(datetime.datetime.now())] = {

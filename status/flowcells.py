@@ -9,8 +9,6 @@ import logging
 from dateutil.relativedelta import relativedelta
 from collections import OrderedDict
 
-from genologics import lims
-from genologics.config import BASEURI, USERNAME, PASSWORD
 import pandas as pd
 
 from status.util import SafeHandler
@@ -18,8 +16,6 @@ from status.flowcell import fetch_ont_run_stats, thresholds
 from status.running_notes import LatestRunningNoteHandler
 
 application_log = logging.getLogger("tornado.application")
-
-lims = lims.Lims(BASEURI, USERNAME, PASSWORD)
 
 
 def find_id(stringable, pattern_type: str) -> re.match:
@@ -423,7 +419,7 @@ class FlowcellLinksDataHandler(SafeHandler):
     def get(self, flowcell):
         self.set_header("Content-type", "application/json")
         try:
-            p = get_container_from_id(flowcell)
+            p = get_container_from_id(self.lims, flowcell)
         except (KeyError, IndexError) as e:
             self.write("{}")
         else:
@@ -453,7 +449,7 @@ class FlowcellLinksDataHandler(SafeHandler):
             self.finish("<html><body>Link title and type is required</body></html>")
         else:
             try:
-                p = get_container_from_id(flowcell)
+                p = get_container_from_id(self.lims, flowcell)
             except (KeyError, IndexError) as e:
                 self.status(400)
                 self.write("Flowcell not found")
@@ -545,7 +541,7 @@ class ReadsTotalHandler(SafeHandler):
 
 
 # Functions
-def get_container_from_id(flowcell):
+def get_container_from_id(lims, flowcell):
     if flowcell[7:].startswith("00000000"):
         # Miseq
         proc = lims.get_processes(

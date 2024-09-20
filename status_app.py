@@ -9,6 +9,8 @@ import requests
 
 from collections import OrderedDict
 from couchdb import Server
+from genologics import lims
+from genologics.config import BASEURI, USERNAME, PASSWORD
 
 import tornado.autoreload
 import tornado.httpserver
@@ -423,6 +425,13 @@ class Application(tornado.web.Application):
         else:
             print(settings.get("couch_server", None))
             raise IOError("Cannot connect to couchdb")
+
+
+        # Setup
+        try:
+            self.lims = lims.Lims(BASEURI, USERNAME, PASSWORD)
+        except AttributeError as e:
+            print("Could not connect to LIMS: {}".format(e))
 
         # Load columns and presets from genstat-defaults user in StatusDB
         genstat_id = ""
