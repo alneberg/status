@@ -183,7 +183,14 @@ from pathlib import Path
 
 
 class Application(tornado.web.Application):
-    def __init__(self, settings):
+    def __init__(self, settings, settings_info=None):
+        if settings_info is None:
+            self.settings_info = {}
+        else:
+            self.settings_info = settings_info
+
+        self.settings = settings
+
         # Set up a set of globals to pass to every template
         self.gs_globals = {}
 
@@ -205,9 +212,9 @@ class Application(tornado.web.Application):
             self.gs_globals["git_commit"] = "unknown"
             self.gs_globals["git_commit_full"] = "unknown"
 
-        self.gs_globals["font_awesome_url"] = settings.get("font_awesome_url", None)
+        self.gs_globals["font_awesome_url"] = self.get_settings("font_awesome_url", None)
         self.gs_globals["prod"] = True
-        if "dev" in settings.get("couch_server"):
+        if "dev" in self.get_settings("couch_server") or options['develop'] or options['testing_mode']:
             self.gs_globals["prod"] = False
 
         handlers = [
@@ -398,7 +405,7 @@ class Application(tornado.web.Application):
         self.loader = template.Loader("design")
 
         # Global connection to the database
-        couch = Server(settings.get("couch_server", None))
+        couch = Server(self.get_settings("couch_server", None))
         if couch:
             self.agreements_db = couch["agreements"]
             self.agreement_templates_db = couch["agreement_templates"]
@@ -423,7 +430,7 @@ class Application(tornado.web.Application):
             self.x_flowcells_db = couch["x_flowcells"]
             self.running_notes_db = couch["running_notes"]
         else:
-            print(settings.get("couch_server", None))
+            print(self.get_settings("couch_server", None))
             raise IOError("Cannot connect to couchdb")
 
 
@@ -436,7 +443,7 @@ class Application(tornado.web.Application):
         # Load columns and presets from genstat-defaults user in StatusDB
         genstat_id = ""
         user_id = ""
-        user = settings.get("username", None)
+        user = self.get_settings("username", None)
         for u in self.gs_users_db.view("authorized/users"):
             if u.get("key") == "genstat-defaults":
                 genstat_id = u.get("value")
@@ -447,13 +454,13 @@ class Application(tornado.web.Application):
                 "genstat-defaults user not found on {}, please "
                 "make sure that the user is available with the "
                 "corresponding defaults information.".format(
-                    settings.get("couch_server", None)
+                    self.get_settings("couch_server", None)
                 )
             )
 
         # We need to get this database as OrderedDict, so the pv_columns doesn't
         # mess up
-        password = settings.get("password", None)
+        password = self.get_settings("password", None)
         headers = {
             "Accept": "application/json",
             "Authorization": "Basic "
@@ -463,25 +470,25 @@ class Application(tornado.web.Application):
             ),
         }
         decoder = json.JSONDecoder(object_pairs_hook=OrderedDict)
-        user_url = "{}/gs_users/{}".format(settings.get("couch_server"), genstat_id)
+        user_url = "{}/gs_users/{}".format(self.get_settings("couch_server"), genstat_id)
         json_user = (
             requests.get(user_url, headers=headers).content.rstrip().decode("ascii")
         )
         self.genstat_defaults = decoder.decode(json_user)
 
         # Load private instrument listing
-        self.instrument_list = settings.get("instruments")
+        self.instrument_list = self.get_settings("instruments")
 
         # If settings states  mode, no authentication is used
-        self.test_mode = settings["Testing mode"]
+        self.test_mode = options['testing_mode']
 
         # google oauth key
-        self.oauth_key = settings["google_oauth"]["key"]
+        self.oauth_key = self.get_settings("google_oauth", {}).get("key")
 
         # ZenDesk
-        self.zendesk_url = settings["zendesk"]["url"]
-        self.zendesk_user = settings["zendesk"]["username"]
-        self.zendesk_token = settings["zendesk"]["token"]
+        self.zendesk_url = self.get_settings("zendesk", {}).get("url")
+        self.zendesk_user = self.get_settings("zendesk", {}).get("username")
+        self.zendesk_token = self.get_settings("zendesk", {}).get("token")
         self.zendesk = Zenpy(
             email=self.zendesk_user,
             token=self.zendesk_token,
@@ -489,42 +496,42 @@ class Application(tornado.web.Application):
         )
 
         # Jira
-        self.jira_url = settings["jira"]["url"]
-        self.jira_user = settings["jira"]["user"]
-        self.jira_api_token = settings["jira"]["api_token"]
-        self.jira_project_key = settings["jira"]["project_key"] 
+        self.jira_url = self.get_settings("jira", {}).get("url")
+        self.jira_user = self.get_settings("jira", {}).get("user")
+        self.jira_api_token = self.get_settings("jira", {}).get("api_token")
+        self.jira_project_key = self.get_settings("jira", {}).get("project_key")
 
         # Slack
-        self.slack_token = settings["slack"]["token"]
+        self.slack_token = self.get_settings("slack", {}).get("token")
 
         # Load password seed
-        self.password_seed = settings.get("password_seed")
+        self.password_seed = self.get_settings("password_seed")
 
         # load logins for the genologics sftp
-        self.genologics_login = settings["sftp"]["login"]
-        self.genologics_pw = settings["sftp"]["password"]
+        self.genologics_login = self.get_settings("sftp", {}).get("login")
+        self.genologics_pw = self.get_settings("sftp", {}).get("password")
 
         # Location of the psul log
-        self.psul_log = settings.get("psul_log")
+        self.psul_log = self.get_settings("psul_log")
 
         # to display instruments in the server status
-        self.server_status = settings.get("server_status")
+        self.server_status = self.get_settings("server_status")
 
         # project summary - multiqc tab
-        self.multiqc_path = settings.get("multiqc_path")
+        self.multiqc_path = self.get_settings("multiqc_path")
 
         # MinKNOW reports
-        self.minknow_path = settings.get("minknow_path")
+        self.minknow_path = self.get_settings("minknow_path")
 
         # lims backend credentials
         limsbackend_cred_loc = Path(
-            settings["lims_backend_credential_location"]
+            self.get_settings("lims_backend_credential_location")
         ).expanduser()
         with limsbackend_cred_loc.open() as cred_file:
             self.lims_conf = yaml.safe_load(cred_file)
 
         order_portal_cred_loc = Path(
-            settings["order_portal_credential_location"]
+            self.get_settings("order_portal_credential_location")
         ).expanduser()
         with order_portal_cred_loc.open() as cred_file:
             self.order_portal_conf = yaml.safe_load(cred_file)["order_portal"]
@@ -582,6 +589,17 @@ class Application(tornado.web.Application):
 
         tornado.web.Application.__init__(self, handlers, **settings)
 
+    def get_settings(self, key, default_value=None):
+        """Intended to be used instead of self.get_settings() to get settings from the settings file.
+        This method will also store metadata about the settings, such as if it was set in the settings file or not.
+        """
+        if key in self.settings:
+            self.settings_info[key] = {'set_in_file': True}
+        else:
+            self.settings_info[key] = {'set_in_file': False}
+
+        return self.settings.get(key, default_value)
+
 
 if __name__ == "__main__":
     # Tornado built-in command line parsing. Auto configures logging
@@ -610,17 +628,19 @@ if __name__ == "__main__":
     tornado.options.parse_command_line()
 
     # Load configuration file
-    with open("settings.yaml") as settings_file:
+    server_settings_info = {} # Used to store metadata about the server settings, shown in debug mode
+    with open("settings.yaml", mode='r') as settings_file:
         server_settings = yaml.full_load(settings_file)
 
-    server_settings["Testing mode"] = options["testing_mode"]
-
+    server_settings_info["cookie_secret"] = {'set_in_file': True}
     if "cookie_secret" not in server_settings:
+        server_settings_info["cookie_secret"] = {'set_in_file': False}
         cookie_secret = base64.b64encode(uuid.uuid4().bytes + uuid.uuid4().bytes)
         server_settings["cookie_secret"] = cookie_secret
 
+
     # Instantiate Application
-    application = Application(server_settings)
+    application = Application(server_settings, settings_info=server_settings_info)
 
     # Load ssl certificate and key files
     ssl_cert = server_settings.get("ssl_cert", None)
