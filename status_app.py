@@ -214,6 +214,10 @@ class Application(tornado.web.Application):
 
         self.gs_globals["font_awesome_url"] = self.get_settings("font_awesome_url", None)
         self.gs_globals["prod"] = True
+        self.gs_globals["develop"] = False
+        if options['develop']:
+            self.gs_globals["develop"] = True
+
         if "dev" in self.get_settings("couch_server") or options['develop'] or options['testing_mode']:
             self.gs_globals["prod"] = False
 

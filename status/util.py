@@ -280,6 +280,7 @@ class MainHandler(UnsafeHandler):
                 user=user,
                 server_status=server_status,
                 presets=presets,
+                settings_info=self.application.settings_info,
             )
         )
 

@@ -51,6 +51,52 @@
 
   </div>
 
+  {% if gs_globals['develop'] %}
+    {% set keys_not_to_be_set = {'cookie_secret': 'Only needs to be set on production server'} %}
+    {% set remaining_keys = set(settings_info.keys()).difference(keys_not_to_be_set.keys()) %}
+    <div>
+      <h1>Your settings info:</h1>
+      <p>These are the settings values the server has been looking for. If any of these are missing some functionality will not be working as intended.</p>
+      <p>This section can be disabled by running the server without the `--develop`</p>
+      <table class="table table-bordered sortable">
+        <thead>
+          <tr class="sticky darkth">
+            <th class="sort">Setting</th>
+            <th class="sort">Key found in file</th>
+            <th class="sort">Comment</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for settings_key, reason in keys_not_to_be_set.items() %}
+            {% set settings_info_row_d = settings_info[settings_key] %}
+            <tr>
+              <td>{{ settings_key }}</td>
+              {% if settings_info_row_d['set_in_file'] %}
+                <td class="table-success">Set in file</td>
+              {% else %}
+                <td class="table-danger">Not set in file</td>
+              {% end %}
+              <td>{{ reason }}</td>
+            </tr>
+          {% end %}
+
+          {% for settings_key in remaining_keys %}
+          {% set settings_info_row_d = settings_info[settings_key] %}
+          <tr>
+            <td>{{ settings_key }}</td>
+            {% if settings_info_row_d['set_in_file'] %}
+              <td class="table-success">Set in file</td>
+            {% else %}
+              <td class="table-danger">Not set in file</td>
+            {% end %}
+            <td>-</td>
+          </tr>
+          {% end %}
+        </tbody>
+      </table>
+    </div>
+  {% end %}
+
   <div class="row pt-5">
     <div class="col-lg-7">
       <h3>Longest waiting projects</h3>
