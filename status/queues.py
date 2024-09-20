@@ -6,7 +6,11 @@ from dateutil.parser import parse
 import ast
 
 from genologics_sql import queries as geno_queries
-from genologics_sql import utils as geno_utils
+try:
+    from genologics_sql import utils as geno_utils
+except Exception as e:
+    print("Could not import genologics_sql, (check if either '~/.genosqlrc.yaml' or '.genosqlrc.yaml' is present): {}".format(e))
+    raise e
 
 from status.running_notes import LatestRunningNoteHandler
 
