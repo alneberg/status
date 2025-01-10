@@ -65,6 +65,9 @@ from status.invoicing import (
     SentInvoiceHandler,
 )
 from status.lanes_ordered import LanesOrderedDataHandler, LanesOrderedHandler
+from status.library_construction_methods_metadata import (
+    LibraryConstructionMethodsMetadataHandler,
+)
 from status.multiqc_report import MultiQCReportHandler
 from status.ngisweden_stats import NGISwedenHandler
 from status.ont_plot import ONTFlowcellPlotHandler, ONTFlowcellYieldHandler
@@ -380,6 +383,10 @@ class Application(tornado.web.Application):
             ("/invoicing", InvoicingPageHandler),
             ("/lanes_ordered", LanesOrderedHandler),
             ("/libpooling_queues", LibraryPoolingQueuesHandler),
+            (
+                "/library_construction_methods_metadata",
+                LibraryConstructionMethodsMetadataHandler,
+            ),
             ("/multiqc_report/([^/]*)$", MultiQCReportHandler),
             ("/ngisweden_stats", NGISwedenHandler),
             ("/pools_qpcr", qPCRPoolsHandler),
@@ -570,6 +577,9 @@ class Application(tornado.web.Application):
             tornado.autoreload.watch("design/instrument_logs.html")
             tornado.autoreload.watch("design/invoicing.html")
             tornado.autoreload.watch("design/lanes_ordered.html")
+            tornado.autoreload.watch(
+                "design/library_construction_methods_metadata.html"
+            )
             tornado.autoreload.watch("design/link_tab.html")
             tornado.autoreload.watch("design/ngisweden_stats.html")
             tornado.autoreload.watch("design/ont_trend_plot.html")

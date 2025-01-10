@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block stuff %}
+<div class="container" id="content">
+	<h1 class="mt-4" id="page_title">Library Construction Methods - Metadata</h1>
+    {% for construction_method, metadata in construction_methods.items() %}
+        <div class="row mb-2">
+            <div class="col-6">
+                <h4>{{construction_method}}</h4>
+            </div>
+            <div class="col-2">
+                <select class="form-select" aria-label="Library Strategy">
+                    {% for option in allowed_options['library_strategy'] %}
+                        <option value="{{option}}" {% if metadata['library_strategy'] == option %}selected{% end %}>{{option}}</option>
+                    {% end %}
+                </select>
+            </div>
+            <div class="col-2">
+                <select class="form-select" aria-label="Library Source">
+                    {% for option in allowed_options['library_source'] %}
+                        <option value="{{option}}" {% if metadata['library_source'] == option %}selected{% end %}>{{option}}</option>
+                    {% end %}
+                </select>
+            </div>
+            <div class="col-2">
+                <select class="form-select" aria-label="Library Selection">
+                    {% for option in allowed_options['library_selection'] %}
+                        <option value="{{option}}" {% if metadata['library_selection'] == option %}selected{% end %}>{{option}}</option>
+                    {% end %}
+                </select>
+            </div>
+        </div>
+
+    {% end %}
+</div>
+
+{% end %}
