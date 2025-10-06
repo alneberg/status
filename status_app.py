@@ -2,6 +2,7 @@
 
 import base64
 import logging
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -192,6 +193,15 @@ from status.worksets import (
 
 ONT_RUN_PATTERN = r"\d{8}_\d{4}_[0-9a-zA-Z]+_[0-9a-zA-Z]+_[0-9a-zA-Z]+"
 
+class CustomStaticFileHandler(tornado.web.StaticFileHandler):
+    def validate_absolute_path(self, root, absolute_path):
+        # If the path is a directory, look for index.html
+        if os.path.isdir(absolute_path):
+            index_path = os.path.join(absolute_path, "index.html")
+            if os.path.exists(index_path):
+                return index_path
+        return super().validate_absolute_path(root, absolute_path)
+
 
 class Application(tornado.web.Application):
     def __init__(self, settings):
@@ -358,6 +368,11 @@ class Application(tornado.web.Application):
             ("/bioinfo/(P[^/]*)$", BioinfoAnalysisHandler),
             ("/clone_project", CloneProjectHandler),
             ("/deliveries", DeliveriesPageHandler),
+            (
+                r"/docs/(.*)",
+                CustomStaticFileHandler,
+                {"path": "static_docs", "default_filename": "Index/index.html"},
+            ),
             ("/flowcells", FlowcellsHandler),
             (r"/flowcells/(\d{6,8}_[^/]*)$", FlowcellHandler),
             (r"/flowcells_element/([^/]*)$", ElementFlowcellHandler),
