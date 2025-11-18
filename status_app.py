@@ -48,6 +48,7 @@ from status.flowcells import (
     FlowcellsHandler,
     FlowcellsInfoDataHandler,
     OldFlowcellsInfoDataHandler,
+    ReadsTotalDataHandler,
     ReadsTotalHandler,
 )
 from status.hashtag_csv import HashTagCSVHandler
@@ -266,6 +267,7 @@ class Application(tornado.web.Application):
             ("/api/v1/flowcell_links/([^/]*)$", FlowcellLinksDataHandler),
             ("/api/v1/flowcell_search/([^/]*)$", FlowcellSearchHandler),
             ("/api/v1/flowcell_yield/([^/]*)$", DataFlowcellYieldHandler),
+            ("/api/v1/reads_total/([^/]*)$", ReadsTotalDataHandler),
             ("/api/v1/ont_plot/([^/]*)$", ONTFlowcellYieldHandler),
             tornado.web.URLSpec(
                 "/api/v1/frag_an_image/(?P<project>[^/]+)/(?P<sample>[^/]+)/(?P<step>[^/]+)",
