@@ -43,6 +43,7 @@ from status.demux_sample_info import (
 from status.flowcell import (
     ElementFlowcellDataHandler,
     ElementFlowcellHandler,
+    FlowcellDataHandler,
     FlowcellHandler,
     ONTFlowcellHandler,
     ONTMinKNOWReportHandler,
@@ -258,6 +259,7 @@ class Application(tornado.web.Application):
             ("/api/v1/draft_cost_calculator", PricingDraftDataHandler),
             ("/api/v1/draft_sample_requirements", SampleRequirementsDraftDataHandler),
             ("/api/v1/element_flowcell/([^/]*$)", ElementFlowcellDataHandler),
+            ("/api/v1/flowcell_data/([^/]*)$", FlowcellDataHandler),
             ("/api/v1/flowcells", FlowcellsDataHandler),
             ("/api/v1/flowcell_info2/([^/]*)$", FlowcellsInfoDataHandler),
             ("/api/v1/flowcell_info/([^/]*)$", OldFlowcellsInfoDataHandler),
