@@ -47,6 +47,7 @@ from status.flowcells import (
     FlowcellSearchHandler,
     FlowcellsHandler,
     FlowcellsInfoDataHandler,
+    FlowcellsYearCountHandler,
     OldFlowcellsInfoDataHandler,
     ReadsTotalHandler,
 )
@@ -138,6 +139,7 @@ from status.running_notes import (
     LatestStickyNoteHandler,
     LatestStickyNotesMultipleHandler,
     RunningNotesDataHandler,
+    RunningNotesYearFilterHandler,
 )
 from status.sample_requirements import (
     SampleRequirementsDataHandler,
@@ -258,6 +260,7 @@ class Application(tornado.web.Application):
             ("/api/v1/flowcell_links/([^/]*)$", FlowcellLinksDataHandler),
             ("/api/v1/flowcell_search/([^/]*)$", FlowcellSearchHandler),
             ("/api/v1/flowcell_yield/([^/]*)$", DataFlowcellYieldHandler),
+            ("/api/v1/flowcells_count/([^/]*)$", FlowcellsYearCountHandler),
             ("/api/v1/ont_plot/([^/]*)$", ONTFlowcellYieldHandler),
             tornado.web.URLSpec(
                 "/api/v1/frag_an_image/(?P<project>[^/]+)/(?P<sample>[^/]+)/(?P<step>[^/]+)",
@@ -308,6 +311,10 @@ class Application(tornado.web.Application):
             ("/api/v1/rna_report/([^/]*$)", ProjectRNAMetaDataHandler),
             ("/api/v1/user_management/roles_teams", RolesAndTeamsHandler),
             ("/api/v1/running_notes/([^/]*)$", RunningNotesDataHandler),
+            (
+                "/api/v1/running_notes_filter/([^/]*)/([^/]*)(?:/([^/]*))?$",
+                RunningNotesYearFilterHandler,
+            ),
             ("/api/v1/links/([^/]*)$", LinksDataHandler),
             ("/api/v1/sample_requirements", SampleRequirementsDataHandler),
             (

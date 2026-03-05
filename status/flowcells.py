@@ -656,3 +656,84 @@ def get_container_from_id(flowcell):
                 )[0]
             c = lims.get_containers(name=proc.udf["Reagent Cartridge ID"])[0]
     return c
+
+
+class FlowcellsYearCountHandler(SafeHandler):
+    """Counts flowcells started in a specific year across all three databases.
+    URL: /api/v1/flowcells_count/<year>
+    """
+
+    def get(self, year):
+        self.set_header("Content-type", "application/json")
+
+        try:
+            year_int = int(year)
+        except ValueError:
+            self.set_status(400)
+            self.write({"error": "Invalid year parameter"})
+            return
+
+        # x_flowcells uses YYMMDD format
+        x_fc_start = f"{str(year_int)[2:]}0101"
+        x_fc_end = f"{str(year_int)[2:]}1231ZZZZ"
+
+        # element_runs and nanopore_runs use YYYYMMDD format
+        element_start = f"{year_int}0101"
+        element_end = f"{year_int}1231ZZZZ"
+        ont_start = f"{year_int}0101"
+        ont_end = f"{year_int}1231ZZZZ"
+
+        counts = {
+            "year": year_int,
+            "x_flowcells": 0,
+            "element_runs": 0,
+            "nanopore_runs": 0,
+            "total": 0,
+        }
+
+        try:
+            # Count x_flowcells (Illumina)
+            x_fc_view = self.application.cloudant.post_view(
+                db="x_flowcells",
+                ddoc="info",
+                view="summary",
+                start_key=x_fc_start,
+                end_key=x_fc_end,
+            ).get_result()
+            counts["x_flowcells"] = len(x_fc_view.get("rows", []))
+
+            # Count element_runs (AVITI)
+            element_view = self.application.cloudant.post_view(
+                db="element_runs",
+                ddoc="info",
+                view="summary",
+                start_key=element_start,
+                end_key=element_end,
+            ).get_result()
+            counts["element_runs"] = len(element_view.get("rows", []))
+
+            # Count nanopore_runs (ONT)
+            ont_view = self.application.cloudant.post_view(
+                db="nanopore_runs",
+                ddoc="info",
+                view="all_stats",
+                start_key=ont_start,
+                end_key=ont_end,
+            ).get_result()
+            counts["nanopore_runs"] = len(ont_view.get("rows", []))
+
+            counts["total"] = (
+                counts["x_flowcells"]
+                + counts["element_runs"]
+                + counts["nanopore_runs"]
+            )
+
+        except Exception as e:
+            logging.getLogger("tornado.general").error(
+                f"Error counting flowcells for year {year}: {e}"
+            )
+            self.set_status(500)
+            self.write({"error": "Failed to count flowcells", "details": str(e)})
+            return
+
+        self.write(counts)

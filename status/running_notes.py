@@ -489,3 +489,104 @@ class InvoicingNotesHandler(SafeHandler):
             for note in result_rows:
                 invoicing_notes.append(note["value"])
             self.write({"invoicing_notes": invoicing_notes})
+
+
+class RunningNotesYearFilterHandler(SafeHandler):
+    """Fetches all running notes from a specific year with optional text and note_type filters.
+    URL: /api/v1/running_notes_filter/<year>/<filter_string>/<note_type>
+    note_type is optional
+    Uses internal pagination to fetch all results.
+    """
+
+    def get(self, year, filter_string=None, note_type=None):
+        self.set_header("Content-type", "application/json")
+
+        # Build date range for the year
+        try:
+            year_int = int(year)
+            # When descending=True, start_key should be the end date and end_key should be the start date
+            start_key = f"{year_int}-12-31T23:59:59.999999"
+            end_key = f"{year_int}-01-01T00:00:00"
+        except ValueError:
+            self.set_status(400)
+            self.write({"error": "Invalid year parameter"})
+            return
+
+        # Fetch all results using internal pagination
+        all_rows = []
+        batch_size = 1000
+        skip = 0
+
+        try:
+            while True:
+                # Log the pagination progress
+                logging.getLogger("tornado.general").info(
+                    f"Fetching running notes for year {year} - batch starting at skip={skip}"
+                )
+                view_result = self.application.cloudant.post_view(
+                    db="running_notes",
+                    ddoc="info_nopart",
+                    view="date",
+                    start_key=start_key,
+                    end_key=end_key,
+                    descending=True,
+                    include_docs=True,
+                    limit=batch_size,
+                    skip=skip,
+                ).get_result()
+
+                rows = view_result.get("rows", [])
+                if not rows:
+                    break
+
+                all_rows.extend(rows)
+
+                # If we got fewer rows than the batch size, we've reached the end
+                if len(rows) < batch_size:
+                    break
+
+                skip += batch_size
+
+        except Exception as e:
+            logging.getLogger("tornado.general").error(
+                f"Error fetching running notes: {e}"
+            )
+            self.set_status(500)
+            self.write({"error": "Failed to fetch running notes", "details": str(e)})
+            return
+
+        filtered_notes = []
+
+        logging.getLogger("tornado.general").info(
+            f"Filtering on {filter_string} - with {len(all_rows)} notes."
+        )
+
+        for row in all_rows:
+            # Get note and note_type from the value (as per view structure)
+            value = row.get("value", {})
+
+            note_text = value.get("note", "")
+            row_note_type = value.get("note_type", "")
+            parent = value.get("parent", "")
+
+            # If parent already in the filtered note, skip it
+            if parent and any(note.get("parent") == parent for note in filtered_notes):
+                continue
+
+            # If note_type is provided, check if it matches
+            if note_type and row_note_type != note_type:
+                continue
+
+            # If filter_string is provided, check if it's in the note
+            if filter_string and filter_string not in note_text:
+                continue
+
+            # Build the response object with relevant fields from doc
+            filtered_note = {
+                "note": note_text,
+                "note_type": row_note_type,
+                "parent": parent,
+            }
+            filtered_notes.append(filtered_note)
+
+        self.write({"running_notes": filtered_notes, "count": len(filtered_notes)})
