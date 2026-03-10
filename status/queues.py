@@ -134,7 +134,7 @@ class qPCRPoolsDataHandler(QueuesBaseHandler):
                 # Library validation has a different query
                 # Queue 41, but query is slightly different to use protocolid for Library Validation QC which is 8 and, also to exclude the controls
                 queues[key] = lib_validation_query.format(value["protocolid"])
-
+        gen_log = logging.getLogger("tornado.general")
         methods = queues.keys()
         cursor = self._get_lims_cursor()
         pools = {}
@@ -163,7 +163,12 @@ class qPCRPoolsDataHandler(QueuesBaseHandler):
                             ):
                                 pools[method][container]["samples"].pop()
                                 continue
-                        proj_details = self.get_proj_details(project)
+                        gen_log.info(f"Fetching project information for {project} in {method} queue")
+                        try:
+                            proj_details = self.get_proj_details(project)
+                        except Exception as e:
+                            gen_log.error(f"Error fetching project details for {project}: {e}")
+                            raise
                         if (
                             proj_details["library_type"]
                             not in pools[method][container]["library_types"]
