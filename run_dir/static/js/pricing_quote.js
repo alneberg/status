@@ -101,9 +101,6 @@ app.component('v-pricing-quote', {
           if(this.noQCProj){
             msg_display += '\n\n'+ first_page_text['specific_conditions']['no-qc_conditions']
           }
-          if(this.$root.price_type==='full_cost'){
-            msg_display += '\n\n'+ first_page_text['specific_conditions']['full_cost_conditions']
-          }
           return marked(msg_display, { sanitize: true })
         },
         has_admin_control(){
@@ -113,16 +110,18 @@ app.component('v-pricing-quote', {
           return this.proj_data['invoice_downloaded']!==''? true:false
         },
         invoice_invalidated(){
-          return this.proj_data['invoice_generated']==='NA'? true:false
+          return this.proj_data['invoice_generated']==='No invoicing'? true:false
         },
         invoice_generated(){
           return this.proj_data['invoice_generated']!==''? true:false
         },
     },
-    created: function() {
-        this.$root.fetchPublishedCostCalculator(true),
-        this.$root.fetchExchangeRates(),
-        this.fetch_latest_agreement_template_doc()
+    created: async function() {
+        await Promise.all([
+          this.$root.fetchPublishedCostCalculator(true),
+          this.$root.fetchExchangeRates(),
+          this.fetch_latest_agreement_template_doc()
+        ])
     },
     mounted: function () {
         this.get_project_specific_data()
@@ -291,6 +290,7 @@ app.component('v-pricing-quote', {
             this.$root.price_type = sel_data['price_type']
             if('special_addition' in sel_data){
               this.$root.quote_special_additions = sel_data['special_addition']
+              this.cLabel_index = Object.keys(sel_data['special_addition']).length
             }
             if('special_percentage' in sel_data){
               this.$root.quote_special_percentage_label = sel_data['special_percentage']['name']
@@ -348,7 +348,7 @@ app.component('v-pricing-quote', {
             timestamp_val= query_timestamp_radio ? query_timestamp_radio.value : ""
           }
           else if(action_type === 'invalidate'){
-            timestamp_val = "NA"
+            timestamp_val = "No invoicing"
           }
           if(timestamp_val!==""){
             proj_id = this.proj_data['project_id']
@@ -757,7 +757,7 @@ app.component('v-pricing-quote', {
                               <span class="col-6 offset-2">
                                 {{ label.name }}
                               </span>
-                              <span class="col-3 text-right font-monospace">{{ label.value.toFixed(2) }} SEK</span>
+                              <span class="col-3 text-right font-monospace">{{ (label.value || 0).toFixed(2) }} SEK</span>
                             </li>
                           </template>
                           <template v-if="any_special_percentage">

@@ -100,6 +100,9 @@ Description: Shows a table with all ongoing and incoming bioinformatics projects
           <a class="text-decoration-none" href="/bioinfo/{{ project_id }}" data-toggle="tooltip" title="Bioinfo Tab" class="bi-project-name">{{ project['project_name'] }}</a><br>
           <small>
             &nbsp; <span class="bi-project-facility badge {% if project['type'] == 'Application' %} bg-success {% else %} bg-primary {% end %}">{{ project.get('type') }}</span>
+            {% for platform in project.get('sequencing_platforms') %}
+            <span class="bi-project-facility badge bg-secondary">{{  platform }}</span>
+            {% end %}
             <span class="bi-project-application text-muted" data-toggle="tooltip" data-delay="500" title="Application">{{ project['application'] }}</span>
             &nbsp; <span class="bi-project-assigned text-muted" data-toggle="tooltip" data-delay="500" title="Bioinfo-responsible">{{ project['bioinfo_responsible'] }} </span>
               <select class="input-small edit-bi-project-assigned text-muted" style="display:none;">
@@ -145,7 +148,13 @@ Description: Shows a table with all ongoing and incoming bioinformatics projects
                 <td class="bioinfo-status-expand"><a href="#bioinfo-fc-{{ project_id }}-{{ flowcell_id }}" class="bioinfo-expand">
                     <span class="fa fa-chevron-right"></span></a></td>
                 <td></td>
-                <td class="bioinfo-granularity"><samp><a class="text-decoration-none" href="/flowcells/{{ flowcell_id }}">{{ flowcell_id }}</a></samp></td>
+                {% set url_addition = "" %}
+                {% if flowcell.get("instrument_type") == "element"%}
+                  {% set url_addition = "_element" %}
+                {% elif flowcell.get("instrument_type") == "ont"%}
+                  {% set url_addition = "_ont" %}
+                {% end %}
+                <td class="bioinfo-granularity"><samp><a class="text-decoration-none" href="/flowcells{{url_addition}}/{{ flowcell_id }}">{{ flowcell_id }}</a></samp></td>
                 <td><span class="bioinfo-status badge {{ status_css.get(flowcell['flowcell_status'], 'bg-primary') }}">{{ flowcell['flowcell_status'] }}</span></td>
                   <td class="bi-run-pwf hide-incoming {% if flowcell['checklist']['total'] == flowcell['checklist']['completed'] %} table-success {% else %} table-warning {% end %}">
                     <div class="progress">

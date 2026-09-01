@@ -2,6 +2,9 @@
 
 import datetime
 import json
+import logging
+
+import ibm_cloud_sdk_core
 
 from status.util import SafeHandler
 
@@ -11,20 +14,30 @@ class SensorpushBaseHandler(SafeHandler):
         # A reasonable start time
         start_time = datetime.datetime.now() - datetime.timedelta(days=start_days_ago)
         start_time_str = start_time.strftime("%Y-%m-%dT00:00:00")
+        end_time_str = datetime.datetime.now().strftime("%Y-%m-%dT00:00:00")
 
-        # Fetch all sensor names from the start day
-        # If a sensor is missing for that date, it won't be fetched
-        sensor_id_view = self.application.sensorpush_db.view(
-            "sensor_id/by_date", descending=True
-        )
-        sensors = [row.value for row in sensor_id_view[start_time_str]]
+        # Fetch all sensor names that have data for the given time range.
+        # The reduce function extracts the unique sensor ids.
+        # If a sensor is missing for the entire period, it won't be fetched
+        sensor_id_view = self.application.cloudant.post_view(
+            db="sensorpush",
+            ddoc="sensor_id",
+            view="by_date",
+            descending=False,
+            reduce=True,
+            start_key=start_time_str,
+            end_key=end_time_str,
+        ).get_result()["rows"]
+
+        # Return empty dict if no sensors found in the time range
+        if len(sensor_id_view) == 0:
+            return {}
+
+        sensors = sensor_id_view[0]["value"]
         if sensors == []:
             return {}
 
         # Fetch samples from 1 month ago for each sensor
-        samples_view = self.application.sensorpush_db.view(
-            "entire_document/by_sensor_id_and_date"
-        )
         sensor_data = {}
         for sensor_original in sorted(sensors):
             # Make it more suitable to use as a selector.
@@ -40,11 +53,16 @@ class SensorpushBaseHandler(SafeHandler):
                 "intervals_lower": [],
                 "intervals_higher": [],
             }
-            for sensor_daily_row in samples_view[
-                [sensor_original, start_time_str] : [sensor_original, "9999"]
-            ]:
-                _, timestamp = sensor_daily_row.key
-                doc = sensor_daily_row.value
+            samples_view = self.application.cloudant.post_view(
+                db="sensorpush",
+                ddoc="entire_document",
+                view="by_sensor_id_and_date",
+                start_key=[sensor_original, start_time_str],
+                end_key=[sensor_original, "9999"],
+            ).get_result()["rows"]
+            for sensor_daily_row in samples_view:
+                _, timestamp = sensor_daily_row["key"]
+                doc = sensor_daily_row["value"]
                 sensor_data[sensor]["samples"] += doc["saved_samples"]
                 sensor_data[sensor]["intervals_lower"] += doc["intervals_lower"]
                 sensor_data[sensor]["intervals_higher"] += doc["intervals_higher"]
@@ -112,8 +130,32 @@ class SensorpushHandler(SensorpushBaseHandler):
     """Serves a page which lists all sensors with temperature info."""
 
     def get(self):
-        sensor_data = self.get_samples(start_days_ago=28)
+        log = logging.getLogger(__name__)
+
+        sensor_data = self.get_samples(start_days_ago=120)
         sensor_24h_data = self.get_samples(start_days_ago=1)
+        # Get most recent data (last 24 hours) to check if sensors are currently active
+        # Note: Each document represents 24 hours, so 1 day is the minimum granularity
+        sensor_recent_data = sensor_24h_data  # Reuse the 24h data
+
+        # Extract list of sensors with recent data (currently active)
+        active_sensor_names = [
+            sensor_info["sensor_name"] for sensor_info in sensor_recent_data.values()
+        ]
+
+        # Fetch expected sensors configuration from gs_configs
+        try:
+            config_doc = self.application.cloudant.get_document(
+                "gs_configs", "sensorpush_expected_sensors"
+            ).get_result()
+            expected_fridges = config_doc.get("expected_fridges", [])
+            expected_freezers = config_doc.get("expected_freezers", [])
+        except ibm_cloud_sdk_core.api_exception.ApiException as e:
+            log.warning(
+                f"Failed to get sensorpush_expected_sensors config, using empty lists: {e}"
+            )
+            expected_fridges = []
+            expected_freezers = []
 
         t = self.application.loader.load("sensorpush.html")
         self.write(
@@ -122,5 +164,8 @@ class SensorpushHandler(SensorpushBaseHandler):
                 user=self.get_current_user(),
                 sensor_data=sensor_data,
                 sensor_24h_data=sensor_24h_data,
+                active_sensors=active_sensor_names,
+                expected_fridges=expected_fridges,
+                expected_freezers=expected_freezers,
             )
         )

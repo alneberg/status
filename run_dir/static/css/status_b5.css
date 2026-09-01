@@ -51,6 +51,10 @@ tfoot {
   display: table-header-group;
 }
 
+.statusdb-search .form-control {
+  margin-right: 4.5rem;
+}
+
 /* .tt = twitter typeahead styles. For homepage search box */
 #navbar-searchbar .twitter-typeahead { background-color: #FFFFFF; }
 
@@ -374,12 +378,13 @@ tr.group, tr.group:hover, .dtrg-group {
 .trunc-note {
   max-height: 400px;
   overflow: scroll;
+  scrollbar-width: thin; /* Firefox */
 }
 
 /* Force visible scrollbars in chrome. Not supported in Firefox */
 .trunc-note::-webkit-scrollbar, .trunc-note-latest::-webkit-scrollbar{
   -webkit-appearance: none;
-  width: 7px;
+  width: 3px;
 }
 /* Force visible scrollbars in chrome. Not supported in Firefox */
 .trunc-note::-webkit-scrollbar-thumb, .trunc-note-latest::-webkit-scrollbar-thumb {
@@ -547,11 +552,11 @@ pre {
 .dl-ont > dt {
   float: left;
   text-align: left;
-  width: 10rem;
+  width: 15rem;
 }
 
 .dl-ont > dd {
-  margin-left: 11rem;
+  margin-left: 15rem;
   margin-bottom: 0rem;
 }
 
@@ -1256,11 +1261,19 @@ thead th.sort::before{
   margin-bottom: 0px;
 }
 
+.table-invoice-pricing{
+    border-collapse: separate !important;
+    border-spacing: 0;
+    width: 100%;
+}
+
 .table-invoice-pricing tr td {
-  border: none;
-  border-bottom-width: 0px!important;
-  padding: 1px;
-  margin: 1px;
+  padding: 2px;
+  background-color: white !important;
+}
+
+.table-invoice-pricing tr.border-top td {
+  border-top: 1px solid #000;
 }
 
 .fillbadgecolour {

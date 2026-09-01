@@ -1,6 +1,8 @@
 """Main genomics-status web application."""
 
 import base64
+import csv
+import logging
 import subprocess
 import uuid
 from pathlib import Path
@@ -11,9 +13,10 @@ import tornado.httpserver
 import tornado.ioloop
 import tornado.web
 import yaml
-from couchdb import Server
+from ibm_cloud_sdk_core.api_exception import ApiException
 from ibmcloudant import CouchDbSessionAuthenticator, cloudant_v1
 from tornado import template
+from tornado.log import LogFormatter
 from tornado.options import define, options
 from zenpy import Zenpy
 
@@ -27,9 +30,17 @@ from status.authorization import LoginHandler, LogoutHandler, UnAuthorizedHandle
 from status.barcode import BarcodeHandler
 from status.bioinfo_analysis import BioinfoAnalysisHandler
 from status.clone_project import CloneProjectHandler, LIMSProjectCloningHandler
+from status.config_handler import ConfigDataHandler
 from status.controls import ControlsHandler
 from status.data_deliveries_plot import DataDeliveryHandler, DeliveryPlotHandler
 from status.deliveries import DeliveriesPageHandler
+from status.demux_sample_info import (
+    DemuxConfigurationDetailHandler,
+    DemuxConfigurationHandler,
+    DemuxSampleInfoDataHandler,
+    DemuxSampleInfoEditorHandler,
+    SampleDeleteHandler,
+)
 from status.flowcell import (
     ElementFlowcellDataHandler,
     ElementFlowcellHandler,
@@ -39,17 +50,16 @@ from status.flowcell import (
     ONTToulligQCReportHandler,
 )
 from status.flowcells import (
-    FlowcellDemultiplexHandler,
     FlowcellLinksDataHandler,
-    FlowcellQ30Handler,
-    FlowcellQCHandler,
     FlowcellsDataHandler,
     FlowcellSearchHandler,
     FlowcellsHandler,
     FlowcellsInfoDataHandler,
     OldFlowcellsInfoDataHandler,
+    ReadsTotalDataHandler,
     ReadsTotalHandler,
 )
+from status.hashtag_csv import HashTagCSVHandler
 from status.instruments import (
     DataInstrumentLogsHandler,
     InstrumentLogsHandler,
@@ -65,9 +75,12 @@ from status.invoicing import (
     SentInvoiceHandler,
 )
 from status.lanes_ordered import LanesOrderedDataHandler, LanesOrderedHandler
-from status.multiqc_report import MultiQCReportHandler
 from status.ngisweden_stats import NGISwedenHandler
 from status.ont_plot import ONTFlowcellPlotHandler, ONTFlowcellYieldHandler
+from status.people_assignments import (
+    PeopleAssignmentsDataHandler,
+    ProjectPeopleAssignmentDataHandler,
+)
 from status.pricing import (
     AgreementDataHandler,
     AgreementMarkSignHandler,
@@ -89,6 +102,17 @@ from status.production import (
     ProductionCronjobsHandler,
 )
 from status.project_cards import ProjectCardsHandler, ProjectCardsWebSocket
+from status.project_creation import (
+    ProjectCreationCountDetailsDataHandler,
+    ProjectCreationDataHandler,
+    ProjectCreationFormDataHandler,
+    ProjectCreationHandler,
+    ProjectCreationIndividualDataFetchHandler,
+    ProjectCreationListFormsDataHandler,
+    ProjectCreationListFormsHandler,
+    ProjectEditingDataHandler,
+    ProjectEditingHandler,
+)
 from status.projects import (
     CaliperImageHandler,
     CharonProjectHandler,
@@ -99,6 +123,7 @@ from status.projects import (
     PresetsOnLoadHandler,
     PrioProjectsTableHandler,
     ProjectDataHandler,
+    ProjectReadsSequencedHandler,
     ProjectRNAMetaDataHandler,
     ProjectSamplesDataHandler,
     ProjectSamplesHandler,
@@ -124,7 +149,14 @@ from status.queues import (
     qPCRPoolsHandler,
 )
 from status.reads_plot import DataFlowcellYieldHandler, FlowcellPlotHandler
+from status.reports import (
+    MultiQCReportHandler,
+    ProjectSummaryReportHandler,
+    SingleCellSampleSummaryReportHandler,
+    VisiumReportHandler,
+)
 from status.running_notes import (
+    InvoicingNotesHandler,
     LatestRunningNotesWithMetaDataHandler,
     LatestStickyNoteHandler,
     LatestStickyNotesMultipleHandler,
@@ -145,16 +177,6 @@ from status.sensorpush import (
     SensorpushHandler,
     SensorpushWarningsDataHandler,
 )
-from status.sequencing import (
-    InstrumentClusterDensityDataHandler,
-    InstrumentClusterDensityPlotHandler,
-    InstrumentErrorrateDataHandler,
-    InstrumentErrorratePlotHandler,
-    InstrumentUnmatchedDataHandler,
-    InstrumentUnmatchedPlotHandler,
-    InstrumentYieldDataHandler,
-    InstrumentYieldPlotHandler,
-)
 from status.statistics import (
     ApplicationOpenProjectsHandler,
     ApplicationOpenSamplesHandler,
@@ -168,14 +190,19 @@ from status.statistics import (
 )
 from status.suggestion_box import SuggestionBoxDataHandler, SuggestionBoxHandler
 from status.testing import TestDataHandler
-from status.user_management import UserManagementDataHandler, UserManagementHandler
+from status.time_tracking import TimeTrackingDataHandler, TimeTrackingHandler
+from status.user_management import (
+    CurrentUserDataHandler,
+    RolesAndTeamsHandler,
+    UserManagementDataHandler,
+    UserManagementHandler,
+)
 from status.user_preferences import UserPrefPageHandler, UserPrefPageHandler_b5
 from status.util import (
     BaseHandler,
     DataHandler,
     LastPSULRunHandler,
     MainHandler,
-    UpdatedDocumentsDatahandler,
 )
 from status.worksets import (
     ClosedWorksetsHandler,
@@ -186,6 +213,7 @@ from status.worksets import (
     WorksetSearchHandler,
     WorksetsHandler,
 )
+from status.yield_calculator import YieldCalculatorHandler
 
 ONT_RUN_PATTERN = r"\d{8}_\d{4}_[0-9a-zA-Z]+_[0-9a-zA-Z]+_[0-9a-zA-Z]+"
 
@@ -215,7 +243,7 @@ class Application(tornado.web.Application):
 
         self.gs_globals["font_awesome_url"] = settings.get("font_awesome_url", None)
         self.gs_globals["prod"] = True
-        if "dev" in settings.get("couch_server"):
+        if "dev" in settings.get("couch_url"):
             self.gs_globals["prod"] = False
 
         handlers = [
@@ -236,7 +264,9 @@ class Application(tornado.web.Application):
                 name="CaliperImageHandler",
             ),
             ("/api/v1/charon_summary/([^/]*)$", CharonProjectHandler),
+            ("/api/v1/configs/([^/]*)$", ConfigDataHandler),
             ("/api/v1/cost_calculator", PricingDataHandler),
+            ("/api/v1/current_user", CurrentUserDataHandler),
             ("/api/v1/delete_invoice", DeleteInvoiceHandler),
             tornado.web.URLSpec(
                 "/api/v1/download_images/(?P<project>[^/]+)/(?P<type>[^/]+)",
@@ -249,9 +279,6 @@ class Application(tornado.web.Application):
             ("/api/v1/flowcells", FlowcellsDataHandler),
             ("/api/v1/flowcell_info2/([^/]*)$", FlowcellsInfoDataHandler),
             ("/api/v1/flowcell_info/([^/]*)$", OldFlowcellsInfoDataHandler),
-            ("/api/v1/flowcell_qc/([^/]*)$", FlowcellQCHandler),
-            ("/api/v1/flowcell_demultiplex/([^/]*)$", FlowcellDemultiplexHandler),
-            ("/api/v1/flowcell_q30/([^/]*)$", FlowcellQ30Handler),
             ("/api/v1/flowcell_links/([^/]*)$", FlowcellLinksDataHandler),
             ("/api/v1/flowcell_search/([^/]*)$", FlowcellSearchHandler),
             ("/api/v1/flowcell_yield/([^/]*)$", DataFlowcellYieldHandler),
@@ -268,22 +295,11 @@ class Application(tornado.web.Application):
             ("/api/v1/generate_invoice", GenerateInvoiceHandler),
             ("/api/v1/generate_invoice_spec", InvoiceSpecDateHandler),
             ("/api/v1/invoice_spec_list", InvoicingPageDataHandler),
-            ("/api/v1/instrument_cluster_density", InstrumentClusterDensityDataHandler),
-            (
-                "/api/v1/instrument_cluster_density.png",
-                InstrumentClusterDensityPlotHandler,
-            ),
-            ("/api/v1/instrument_error_rates", InstrumentErrorrateDataHandler),
-            ("/api/v1/instrument_error_rates.png", InstrumentErrorratePlotHandler),
             ("/api/v1/instrument_logs", DataInstrumentLogsHandler),
             ("/api/v1/instrument_logs/([^/]*)/([^/]*)$", DataInstrumentLogsHandler),
             ("/api/v1/instrument_names", InstrumentNamesHandler),
-            ("/api/v1/instrument_unmatched", InstrumentUnmatchedDataHandler),
-            ("/api/v1/instrument_unmatched.png", InstrumentUnmatchedPlotHandler),
-            ("/api/v1/instrument_yield", InstrumentYieldDataHandler),
-            ("/api/v1/instrument_yield.png", InstrumentYieldPlotHandler),
+            ("/api/v1/invoicing_notes/([^/]*)", InvoicingNotesHandler),
             ("/api/v1/lanes_ordered", LanesOrderedDataHandler),
-            ("/api/v1/last_updated", UpdatedDocumentsDatahandler),
             ("/api/v1/last_psul", LastPSULRunHandler),
             (
                 "/api/v1/latest_running_notes_with_meta",
@@ -293,6 +309,7 @@ class Application(tornado.web.Application):
             ("/api/v1/latest_sticky_run_note", LatestStickyNotesMultipleHandler),
             ("/api/v1/libpooling_queues", LibraryPoolingQueuesDataHandler),
             ("/api/v1/lims_project_data/([^/]*)$", LIMSProjectCloningHandler),
+            ("/api/v1/list_people_assignments", PeopleAssignmentsDataHandler),
             ("/api/v1/mark_agreement_signed", AgreementMarkSignHandler),
             ("/api/v1/pricing_date_to_version", PricingDateToVersionDataHandler),
             ("/api/v1/pricing_exchange_rates", PricingExchangeRatesDataHandler),
@@ -303,8 +320,18 @@ class Application(tornado.web.Application):
             ("/api/v1/proj_staged/([^/]*)$", DataDeliveryHandler),
             ("/api/v1/projects", ProjectsDataHandler),
             ("/api/v1/project/([^/]*)$", ProjectSamplesDataHandler),
+            ("/api/v1/project/([^/]*)/people", ProjectPeopleAssignmentDataHandler),
+            (
+                "/api/v1/project/([^/]*)/people/([^/]*)$",
+                ProjectPeopleAssignmentDataHandler,
+            ),
             ("/api/v1/project/([^/]*)/tickets", ProjectTicketsDataHandler),
+            ("/api/v1/project_count_details", ProjectCreationCountDetailsDataHandler),
+            ("/api/v1/project_creation_form", ProjectCreationFormDataHandler),
+            ("/api/v1/project_creation_form_edit", ProjectEditingDataHandler),
+            ("/api/v1/project_creation_forms", ProjectCreationListFormsDataHandler),
             ("/api/v1/projects_fields", ProjectsFieldsDataHandler),
+            ("/api/v1/project_reads_sequenced/([^/]*)$", ProjectReadsSequencedHandler),
             ("/api/v1/project_summary/([^/]*)$", ProjectDataHandler),
             ("/api/v1/project_search/([^/]*)$", ProjectsSearchHandler),
             ("/api/v1/project_websocket", ProjectCardsWebSocket),
@@ -312,6 +339,8 @@ class Application(tornado.web.Application):
             ("/api/v1/presets/onloadcheck", PresetsOnLoadHandler),
             ("/api/v1/qpcr_pools", qPCRPoolsDataHandler),
             ("/api/v1/rna_report/([^/]*$)", ProjectRNAMetaDataHandler),
+            ("/api/v1/reads_total/([^/]*)$", ReadsTotalDataHandler),
+            ("/api/v1/user_management/roles_teams", RolesAndTeamsHandler),
             ("/api/v1/running_notes/([^/]*)$", RunningNotesDataHandler),
             ("/api/v1/links/([^/]*)$", LinksDataHandler),
             ("/api/v1/sample_requirements", SampleRequirementsDataHandler),
@@ -348,8 +377,14 @@ class Application(tornado.web.Application):
                 YearDeliverytimeApplicationHandler,
             ),
             ("/api/v1/deliveries/set_bioinfo_responsible$", DeliveriesPageHandler),
+            ("/api/v1/submit_project_creation_form", ProjectCreationDataHandler),
+            (
+                "/api/v1/project_creation_data_fetch",
+                ProjectCreationIndividualDataFetchHandler,
+            ),
             ("/api/v1/suggestions", SuggestionBoxDataHandler),
             (r"/api/v1/test/(\w+)?", TestDataHandler),
+            ("/api/v1/time_tracking", TimeTrackingDataHandler),
             ("/api/v1/user_management/users", UserManagementDataHandler),
             ("/api/v1/workset/([^/]*)$", WorksetDataHandler),
             ("/api/v1/worksets", WorksetsDataHandler),
@@ -357,6 +392,13 @@ class Application(tornado.web.Application):
             ("/api/v1/workset_links/([^/]*)$", WorksetLinksHandler),
             ("/api/v1/workset_queues", WorksetQueuesDataHandler),
             ("/api/v1/closed_worksets", ClosedWorksetsHandler),
+            ("/api/v1/demux_sample_info/([^/]*)$", DemuxSampleInfoDataHandler),
+            (
+                "/api/v1/demux_sample_info/([^/]*)/sample/([^/]*)/([^/]*)$",
+                SampleDeleteHandler,
+            ),
+            ("/api/v1/demux_configuration", DemuxConfigurationHandler),
+            ("/api/v1/demux_configuration/([^/]*)$", DemuxConfigurationDetailHandler),
             ("/barcode", BarcodeHandler),
             ("/controls", ControlsHandler),
             ("/applications", ApplicationsHandler),
@@ -377,6 +419,7 @@ class Application(tornado.web.Application):
                 ONTToulligQCReportHandler,
             ),
             ("/flowcells_plot", FlowcellPlotHandler),
+            ("/10X_chromium_hashtag_csv", HashTagCSVHandler),
             ("/ont_flowcells_plot", ONTFlowcellPlotHandler),
             ("/data_delivered_plot", DeliveryPlotHandler),
             ("/generate_quote", GenerateQuoteHandler),
@@ -394,21 +437,36 @@ class Application(tornado.web.Application):
             ("/production/cronjobs", ProductionCronjobsHandler),
             ("/project/([^/]*)$", ProjectSamplesOldHandler),
             ("/project_new/([^/]*)$", ProjectSamplesHandler),
+            ("/project_creation", ProjectCreationHandler),
+            ("/project_creation_edit/([^/]*)$", ProjectEditingHandler),
+            ("/project_creation_forms", ProjectCreationListFormsHandler),
             ("/projects", ProjectsHandler),
             ("/project_cards", ProjectCardsHandler),
             ("/proj_meta", ProjMetaCompareHandler),
+            ("/proj_summary_report/([^/]*)$", ProjectSummaryReportHandler),
             ("/reads_total/([^/]*)$", ReadsTotalHandler),
             ("/rec_ctrl_view/([^/]*)$", RecCtrlDataHandler),
             ("/sample_requirements", SampleRequirementsViewHandler),
             ("/sample_requirements_preview", SampleRequirementsPreviewHandler),
             ("/sample_requirements_update", SampleRequirementsUpdateHandler),
+            ("/demux_sample_info_editor", DemuxSampleInfoEditorHandler),
             ("/sensorpush", SensorpushHandler),
             ("/sequencing_queues", SequencingQueuesHandler),
+            ("/yield_calculator", YieldCalculatorHandler),
+            (
+                "/singlecell_sample_summary_report/(P[^/]*)/([^/]*)/([^/]*)$",
+                SingleCellSampleSummaryReportHandler,
+            ),
             ("/smartseq3_progress", SmartSeq3ProgressPageHandler),
             ("/suggestion_box", SuggestionBoxHandler),
+            ("/time_tracking", TimeTrackingHandler),
             ("/user_management", UserManagementHandler),
             ("/userpref", UserPrefPageHandler),
             ("/userpref_b5", UserPrefPageHandler_b5),
+            (
+                "/visium_sample_summary_report/(P[^/]*)/([^/]*)$",
+                VisiumReportHandler,
+            ),
             ("/worksets", WorksetsHandler),
             ("/workset_queues", WorksetQueuesHandler),
             ("/workset/([^/]*)$", WorksetHandler),
@@ -421,70 +479,26 @@ class Application(tornado.web.Application):
         self.loader = template.Loader("design")
 
         # Global connection to the database
-        couch = Server(settings.get("couch_server", None))
-        if couch:
-            self.agreements_db = couch["agreements"]
-            self.agreement_templates_db = couch["agreement_templates"]
-            self.analysis_db = couch["analysis"]
-            self.application_categories_db = couch["application_categories"]
-            self.bioinfo_db = couch["bioinfo_analysis"]
-            self.biomek_errs_db = couch["biomek_logs"]
-            self.cost_calculator_db = couch["cost_calculator"]
-            self.cronjobs_db = couch["cronjobs"]
-            self.element_runs_db = couch["element_runs"]
-            self.flowcells_db = couch["flowcells"]
-            self.gs_users_db = couch["gs_users"]
-            self.instruments_db = couch["instruments"]
-            self.instrument_logs_db = couch["instrument_logs"]
-            self.nanopore_runs_db = couch["nanopore_runs"]
-            self.pricing_exchange_rates_db = couch["pricing_exchange_rates"]
-            self.projects_db = couch["projects"]
-            self.sample_requirements_db = couch["sample_requirements"]
-            self.sensorpush_db = couch["sensorpush"]
-            self.server_status_db = couch["server_status"]
-            self.suggestions_db = couch["suggestion_box"]
-            self.worksets_db = couch["worksets"]
-            self.x_flowcells_db = couch["x_flowcells"]
-            self.running_notes_db = couch["running_notes"]
-        else:
-            print(settings.get("couch_server", None))
-            raise OSError("Cannot connect to couchdb")
-
         cloudant = cloudant_v1.CloudantV1(
             authenticator=CouchDbSessionAuthenticator(
-                settings.get("username"), settings.get("password")
+                settings.get("couch_username"), settings.get("couch_password")
             )
         )
         cloudant.set_service_url(settings.get("couch_url"))
         if cloudant:
             self.cloudant = cloudant
 
-        # Load columns and presets from genstat-defaults user in StatusDB
-        genstat_id_rows = self.gs_users_db.view("authorized/users")[
-            "genstat-defaults"
-        ].rows
-        for row in genstat_id_rows:
-            genstat_defaults_doc_id = row.get("value")
-
-        # It's important to check that this user exists!
-        if not genstat_defaults_doc_id:
-            raise RuntimeError(
-                "genstat-defaults user not found on {}, please "
-                "make sure that the user is available with the "
-                "corresponding defaults information.".format(
-                    settings.get("couch_server", None)
+        try:
+            self.genstat_defaults = self.cloudant.get_document(
+                db="gs_configs", doc_id="genstat_defaults"
+            ).get_result()
+        except ApiException as e:
+            if e.status_code == 404:
+                raise RuntimeError(
+                    "genstat-defaults doc not found in gs_configs, please "
+                    "make sure that the doc is available with the "
+                    "corresponding defaults information."
                 )
-            )
-        elif len(genstat_id_rows) > 1:
-            # Not sure this can actually happen, but worth checking
-            raise RuntimeError(
-                "Multiple genstat-default users found in the database, please fix"
-            )
-
-        self.genstat_defaults = self.gs_users_db[genstat_defaults_doc_id]
-
-        # Load private instrument listing
-        self.instrument_list = settings.get("instruments")
 
         # If settings states  mode, no authentication is used
         self.test_mode = settings["Testing mode"]
@@ -511,27 +525,33 @@ class Application(tornado.web.Application):
         # Slack
         self.slack_token = settings["slack"]["token"]
 
-        # Load password seed
-        self.password_seed = settings.get("password_seed")
-
-        # load logins for the genologics sftp
-        self.genologics_login = settings["sftp"]["login"]
-        self.genologics_pw = settings["sftp"]["password"]
-
         # Location of the psul log
         self.psul_log = settings.get("psul_log")
 
         # to display instruments in the server status
         self.server_status = settings.get("server_status")
 
-        # project summary - multiqc tab
-        self.multiqc_path = settings.get("multiqc_path")
+        # Load named indices from config directory
+        self.named_indices = self._load_named_indices(settings.get("config_dir", "."))
 
-        # MinKNOW reports
-        self.minknow_reports_path = settings.get("minknow_reports_path")
-
-        # ToulligQC reports
-        self.toulligqc_reports_path = settings.get("toulligqc_reports_path")
+        # project summary - reports tab
+        # Structure of the reports folder:
+        # <reports_path>/
+        # ├── other_reports/
+        # │    └── toulligqc_reports/
+        # ├── minknow_reports/
+        # ├── mqc_reports/
+        # ├── Visium/<project_id>/
+        # └── yggdrasil/<project_id>/
+        self.reports_path = settings.get("reports_path")
+        self.report_path = {}
+        self.report_path["minknow"] = Path(self.reports_path, "minknow_reports")
+        self.report_path["multiqc"] = Path(self.reports_path, "mqc_reports")
+        self.report_path["toulligqc"] = Path(
+            self.reports_path, "other_reports", "toulligqc_reports"
+        )
+        self.report_path["visium"] = Path(self.reports_path, "Visium")
+        self.report_path["yggdrasil"] = Path(self.reports_path, "yggdrasil")
 
         # lims backend credentials
         limsbackend_cred_loc = Path(
@@ -545,6 +565,9 @@ class Application(tornado.web.Application):
         ).expanduser()
         with order_portal_cred_loc.open() as cred_file:
             self.order_portal_conf = yaml.safe_load(cred_file)["order_portal"]
+
+        # Add LIMS URL to globals for templates
+        self.gs_globals["lims_url"] = self.lims_conf.get("url", "")
 
         # Setup the Tornado Application
 
@@ -577,6 +600,8 @@ class Application(tornado.web.Application):
             tornado.autoreload.watch("design/lanes_ordered.html")
             tornado.autoreload.watch("design/link_tab.html")
             tornado.autoreload.watch("design/ngisweden_stats.html")
+            tornado.autoreload.watch("design/ont_flowcell.html")
+            tornado.autoreload.watch("design/ont_flowcells.html")
             tornado.autoreload.watch("design/ont_trend_plot.html")
             tornado.autoreload.watch("design/qpcr_pools.html")
             tornado.autoreload.watch("design/pricing_products.html")
@@ -600,6 +625,61 @@ class Application(tornado.web.Application):
             tornado.autoreload.watch("design/worksets.html")
 
         tornado.web.Application.__init__(self, handlers, **settings)
+
+    def _load_named_indices(self, config_dir):
+        """Load named indices from CSV files in the named_indices directory.
+
+        Args:
+            config_dir: Path to the configuration directory
+
+        Returns:
+            Dictionary mapping file names to dictionaries of named index to list of sequence lists.
+            Each sequence list contains 1-2 items in order (i7, optionally i5).
+        """
+        named_indices = {}
+        named_indices_dir = Path(config_dir) / "named_indices"
+
+        if not named_indices_dir.exists():
+            logging.warning(f"Named indices directory not found: {named_indices_dir}")
+            return named_indices
+
+        # Read all CSV files in the directory
+        for csv_file in named_indices_dir.glob("*.csv"):
+            try:
+                file_key = csv_file.stem  # Get filename without extension
+                file_indices = {}
+
+                with csv_file.open("r") as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        if row:  # Skip empty rows
+                            named_index = row[0]
+                            sequences = row[1:]
+
+                            # Validate sequence count (max 2: i7 and i5)
+                            if len(sequences) > 2:
+                                logging.warning(
+                                    f"Row for '{named_index}' in {csv_file.name} has {len(sequences)} sequences, "
+                                    f"expected max 2 (i7 and i5). Using only first 2."
+                                )
+                                sequences = sequences[:2]
+
+                            # Add to file_indices (named index can appear multiple times)
+                            if named_index in file_indices:
+                                file_indices[named_index].append(sequences)
+                            else:
+                                file_indices[named_index] = [sequences]
+
+                named_indices[file_key] = file_indices
+                logging.info(f"Loaded indices from {csv_file.name}")
+            except Exception as e:
+                logging.error(f"Error loading named indices from {csv_file}: {e}")
+
+        logging.info(
+            f"Loaded {len(named_indices)} named index files from {named_indices_dir}"
+        )
+
+        return named_indices
 
 
 if __name__ == "__main__":
@@ -625,14 +705,28 @@ if __name__ == "__main__":
     define(
         "port", default=9761, type=int, help="The port that the server will listen to."
     )
+
+    define(
+        "config_dir",
+        default="~/conf",
+        type=str,
+        help="Path to the directory containing configuration files",
+    )
     # After parsing the command line, the command line flags are stored in tornado.options
     tornado.options.parse_command_line()
+    logging_format = f"%(color)s[%(levelname)1.1s %(asctime)s %(module)s:%(lineno)d] [port:{options['port']}]%(end_color)s %(message)s"
+    log_formatter = LogFormatter(fmt=logging_format, color=True)
+    logging.getLogger().handlers[0].setFormatter(log_formatter)
+
+    # Configuration directory path from command line
+    config_dir = Path(options["config_dir"]).expanduser()
 
     # Load configuration file
     with open("settings.yaml") as settings_file:
         server_settings = yaml.full_load(settings_file)
 
     server_settings["Testing mode"] = options["testing_mode"]
+    server_settings["config_dir"] = config_dir
 
     if "cookie_secret" not in server_settings:
         cookie_secret = base64.b64encode(uuid.uuid4().bytes + uuid.uuid4().bytes)

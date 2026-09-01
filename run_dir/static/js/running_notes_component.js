@@ -1,3 +1,5 @@
+import { getDropdownPosition } from './smart_suggestion.js';
+
 const cat_classes = {
     'automatic': {
       'Workset': ['primary', 'calendar-plus', 'btn-primary', 'For workset-related work'],
@@ -16,21 +18,189 @@ const cat_classes = {
     }
   }
 
+  export const vRunningNoteSingle = {
+    props: ['running_note_obj', 'compact', "partition_id", "uri_hash"],
+    data: function() {
+        return {
+            glowingCard: false
+        }
+    },
+    mounted() {
+        if (this.uri_hash === '#' + this.note_id) {
+            this.make_selected_card_glow()
+        }
+    },
+    computed: {
+        categories() {
+            return this.getRunningNoteProperty('categories').map(category => category.trim())
+        },
+        categories_labels() {
+            if (this.categories == undefined) {
+                return ''
+            }
+            return this.generateCategoryLabel(this.categories)
+        },
+        mark_card_important() {
+            return this.categories.includes('Important') ? 'card-important' : ''
+        },
+        created_at_utc() {
+            return this.getRunningNoteProperty('created_at_utc')
+        },
+        formattedTimeStamp() {
+            let date = new Date(this.created_at_utc);
+            return date.toDateString() + ', ' + date.toLocaleTimeString(date);
+        },
+        timestampAge() {
+            // Get the timestamp from the running note
+            let timestamp = this.created_at_utc;
+
+            // Create a new Date object using the timestamp
+            let date = new Date(timestamp);
+
+            // Get the current date
+            let now = new Date();
+
+            // Calculate the difference in seconds
+            let diffInSeconds = Math.floor((now - date) / 1000);
+
+            if (diffInSeconds < 60) {
+                return 'Just now';
+            }
+
+            let diffInMinutes = Math.floor(diffInSeconds / 60);
+            if (diffInMinutes < 60) {
+                return `${diffInMinutes} minutes ago`;
+            }
+
+            let diffInHours = Math.floor(diffInMinutes / 60);
+            if (diffInHours < 24) {
+                return `${diffInHours} hours ago`;
+            }
+
+            let diffInDays = Math.floor(diffInHours / 24);
+            return `${diffInDays} days ago`;
+        },
+        formatted_note() {
+            if (this.note == undefined) {
+                return ''
+            }
+            return make_markdown(this.note)
+        },
+        running_note() {
+            if (this.running_note_obj == undefined) {
+                return undefined
+            }
+            // Check if running note is an object
+
+            if (typeof this.running_note_obj == 'object') {
+                return this.running_note_obj
+            }
+            let running_note_json = JSON.parse(this.running_note_obj)
+            return Object.values(running_note_json)[0];
+        },
+        note_hash(){
+            return (new Date(this.created_at_utc).getTime());
+        },
+        note_id() {
+            return 'running_note_'+this.partition_id+'_'+this.note_hash;
+        },
+        email() {
+            return this.getRunningNoteProperty('email')
+        },
+        note() {
+            return this.getRunningNoteProperty('note')
+        },
+        user() {
+            return this.getRunningNoteProperty('user')
+        },
+        href(){
+            return '/project_new/' + this.partition_id + '#' + this.note_id
+        },
+    },    
+    methods: {
+        generateCategoryLabel(categories){
+           let cat_label = '';
+           Object.values(categories).forEach(function(val){
+             if (Object.values(cat_classes).some(subCat => subCat.hasOwnProperty(val))){
+                const subCat = Object.values(cat_classes).find(subCat => subCat.hasOwnProperty(val));
+                 cat_label += '<span class="badge bg-'+subCat[val][0]+'">'+val+'&nbsp;'+'<span class="fa fa-'+ subCat[val][1] +'">'+"</span></span> ";
+             }
+           });
+           return cat_label;
+        },
+        getRunningNoteProperty(key){
+            if (this.running_note !== undefined) {
+                if (key in this.running_note) {
+                    return this.running_note[key]
+                }
+            }
+            return undefined
+        },
+        makeSelectedCardGlow(event) {
+            this.$nextTick(() => {
+                this.$refs.card_div.scrollIntoView({ block: "center" });
+                this.glowingCard = true;
+                setTimeout(() => {
+                    this.glowingCard = false;
+                }, 3000);
+            });
+        }
+    },
+    template:
+    /*html*/`
+    <div class="pb-3">
+        <div :class="['card', {glow: glowingCard}]" ref="card_div">
+            <div class="card-header" :class="mark_card_important" :id="note_id">
+                <a class="text-decoration-none" :href="'mailto:' + this.email">{{this.user}}</a>
+                <template v-if="!compact">
+                - <a @click.prevent="makeSelectedCardGlow" class="text-decoration-none" :href=this.href>
+                    <span class="todays_date">{{ formattedTimeStamp }}</span>
+                </a>
+                </template>
+                <span> - {{timestampAge}}</span>
+                <template v-if="categories">
+                - <span v-html="categories_labels"/>
+                </template>
+            </div>
+            <div class="card-body trunc-note">
+                <div class="running-note-body" v-html="formatted_note"/>
+            </div>
+        </div>
+    </div>
+    `,
+}
+
 export const vRunningNotesTab = {
-    props: ['user', 'partition_id', 'all_users', 'note_type'],
+    components: {
+        vRunningNoteSingle,
+    },
+    // all_users_parent and current_user are optional props to avoid fetching user details again if already fetched in parent component
+    // like in project cards view
+    props: ['partition_id', 'note_type', 'all_users_parent', 'current_user'],
     data() {
         return {
+            category_filter: 'All',
             dropdown_position: {},
             form_categories: [],
             form_note_text: '',
             user_suggestions: [],
             running_notes: [],
+            search_term: '',
             submitting: false,
             show_help: false,
-            cat_classes: cat_classes
+            cat_classes: cat_classes,
+            all_users: {},
+            user: {
+                user: '',
+                email: '',
+                role: ''
+            },
         }
     },
     computed: {
+        all_user_names() {
+            return Object.keys(this.all_users).map(email => email.split('@')[0].toLowerCase())
+        },
         anySuggestion() {
             return this.user_suggestions.length > 0
         },
@@ -55,12 +225,35 @@ export const vRunningNotesTab = {
                 height: this.dropdown_position.height + 'px'
             }   
         },
+        visible_running_notes() {
+            let running_notes_tmp = Object.entries(this.running_notes)
+
+            if (this.search_term !== '') {
+                running_notes_tmp = running_notes_tmp.filter(([running_note_key, running_note]) => {
+                    return (running_note.note.toLowerCase().includes(this.search_term.toLowerCase())) ||
+                                (running_note.user.toLowerCase().includes(this.search_term.toLowerCase())) ||
+                                (running_note.categories.join(' ').toLowerCase().includes(this.search_term.toLowerCase()))
+                })
+            }
+
+            // Filter by category
+            if (this.category_filter !== 'All') {
+                running_notes_tmp = running_notes_tmp.filter(([running_note_key, running_note]) => {
+                    return running_note.categories.includes(this.category_filter)
+                })
+            }
+
+            return Object.fromEntries(running_notes_tmp)
+        },
         visible_user_suggestions() {
             // Only show the first 5 suggestions
             return this.user_suggestions.slice(0, 5)
         }
     },
     methods: {
+        getDropdownPositionHelper(input, dropdownHeight) {
+            return getDropdownPosition(input, dropdownHeight)
+        },
         check_uri_hash(){
             // If the uri is a link to a specific note, we send that to each note with a props so that the correct one can glow up
             if (window.location.hash) {
@@ -69,6 +262,47 @@ export const vRunningNotesTab = {
                 }
             }
             return null
+        },
+        fetchAllRunningNotes(partition_id) {
+            axios
+                .get('/api/v1/running_notes/' + partition_id)
+                .then(response => {
+                    let data = response.data
+                    if (data !== null) {
+                        this.running_notes = data;
+                    }
+                })
+                .catch(error => {
+                    this.$root.error_messages.push('Unable to fetch running notes, please try again or contact a system administrator.')
+                })
+        },
+        fetchAllUsers() {
+            axios
+                .get('/api/v1/user_management/users')
+                .then(response => {
+                    let data = response.data
+                    if (data !== null) {
+                        this.all_users = data
+                    }
+                })
+                .catch(error => {
+                    console.log(error)
+                    this.error_messages.push('Unable to fetch users, please try again or contact a system administrator.')
+                })
+        },
+        fetch_current_user() {
+            axios
+                .get('/api/v1/current_user')
+                .then(response => {
+                    let data = response.data
+                    if (data !== null) {
+                        this.user = data
+                    }
+                })
+                .catch(error => {
+                    console.log(error)
+                    this.$root.error_messages.push('Unable to fetch current user, please try again or contact a system administrator.')
+                })
         },
         openNewNoteForm() {
             let new_note_form = this.$refs.new_note_form;
@@ -87,7 +321,10 @@ export const vRunningNotesTab = {
             if (textarea === undefined) {
                 return {}
             }
-            this.dropdown_position = this.$root.getDropdownPositionHelper(textarea, 100);
+            this.dropdown_position = this.getDropdownPositionHelper(textarea, 100);
+        },
+        setFilter(filter) {
+            this.category_filter = filter
         },
         submitRunningNote() {
             this.submitting = true;
@@ -122,7 +359,6 @@ export const vRunningNotesTab = {
             axios
                 .post('/api/v1/running_notes/' + this.partition_id, post_body)
                 .then(response => {
-                    alert("TODO: fetch new running notes automatically")
                     this.fetchAllRunningNotes(this.partition_id)
                     this.form_note_text = ''
                     this.form_categories = []
@@ -142,7 +378,7 @@ export const vRunningNotesTab = {
 
             if (current_word.startsWith('@')) {
                 current_word = current_word.substring(1).toLowerCase();
-                let user_suggestions = this.all_users.filter(user => user.includes(current_word));
+                let user_suggestions = this.all_user_names.filter(user => user.includes(current_word));
                 this.user_suggestions = user_suggestions;
             } else {
                 this.user_suggestions = [];
@@ -199,11 +435,44 @@ export const vRunningNotesTab = {
         showMarkdownHelp() {
             this.show_help = !this.show_help;
         },
+
+        countCards(category) {
+            if(category === 'All') {
+                return Object.values(this.running_notes).length
+            }
+            return Object.values(this.running_notes).filter(running_note => running_note.categories.includes(category)).length
+        },
+        labelColor(category) {
+            if (category === 'All') {
+                return 'badge bg-secondary'
+            }
+            if(Object.values(cat_classes).some(subCat => subCat.hasOwnProperty(category))){
+                const subCat = Object.values(cat_classes).find(subCat => subCat.hasOwnProperty(category));
+                return 'badge bg-'+subCat[category][0];
+            }
+            return ''
+        }
     },
     mounted() {
-        if ( !( ["flowcell", "workset", "flowcell_ont", "project"].includes(this.note_type))) {
+        if ( !( ["flowcell", "workset", "flowcell_ont", "project", "flowcell_element"].includes(this.note_type))) {
             alert("Error: Invalid note type given, will not fetch notes")
             return
+        }
+        this.fetchAllRunningNotes(this.partition_id);
+        if(!this.all_users_parent
+            || typeof this.all_users_parent !== 'object'
+            || Object.keys(this.all_users_parent).length === 0){
+            this.fetchAllUsers();
+        }
+        else{
+            this.all_users = this.all_users_parent;
+        }
+        if (!this.current_user
+            || typeof this.current_user !== 'object') {
+            this.fetch_current_user();
+        }
+        else{
+            this.user = this.current_user;
         }
     },
     template: /*html*/`
@@ -357,6 +626,40 @@ export const vRunningNotesTab = {
     </div>
 
 
+    <!-- filter running notes -->
+    <div id="running_notes_filter" class="row" style="margin-bottom:12px;">
+      <div class="col-3 ml-2">
+        <label>Search :</label>
+        <input type="text" v-model="search_term" class="form-control" ref="note_search"/>
+      </div>
+      <div class="col-2">
+        <label>Filter :</label>
+
+        <div class="dropdown">
+            <button class="btn btn-outline-secondary text-dark dropdown-toggle btn_count" type="button" id="rn_category" data-toggle="dropdown" aria-expanded="false">
+             <span :class="['mr-2', labelColor(category_filter)]">{{countCards(category_filter) }}</span> {{category_filter}}
+            </button>
+            <ul class="dropdown-menu" aria-labelledby="rn_category">
+                <li><button class="dropdown-item" type="button" @click="setFilter('All')"><span :class="['mr-2', labelColor('All')]">{{countCards('All') }}</span>All</button></li>
+                <li v-show="countCards('All')>0"><div class="dropdown-divider"></div></li>
+                <li v-for="item in Object.keys(cat_classes['automatic'])" :key="item" v-show="countCards(item)>0">
+                    <button class="dropdown-item" type="button" @click="setFilter(item)">
+                        <span :class="['mr-2', labelColor(item)]">{{ countCards(item) }}</span>
+                         {{ item }}
+                    </button>
+                </li>
+
+                <li v-show="countCards('All')>0"><div class="dropdown-divider"></div></li>
+                <li v-for="item in Object.keys(cat_classes['manual'])" :key="item" v-show="countCards(item)>0">
+                    <button class="dropdown-item" type="button" @click="setFilter(item)">
+                        <span :class="['mr-2', labelColor(item)]">{{ countCards(item) }}</span>
+                         {{ item }}
+                    </button>
+                </li>
+            </ul>
+        </div>
+      </div>
+    </div>
 
     <!-- display running notes -->
     <p>This is the notes</p>

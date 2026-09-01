@@ -12,6 +12,8 @@ import markdown
 import nest_asyncio
 import slack_sdk
 import tornado
+from html_sanitizer import Sanitizer
+from tornado.template import Template
 
 from status.util import SafeHandler
 
@@ -24,11 +26,11 @@ class RunningNotesDataHandler(SafeHandler):
     def get(self, partitionid):
         self.set_header("Content-type", "application/json")
         running_notes_json = {}
-        running_notes_docs = self.application.running_notes_db.view(
-            f"_partition/{partitionid}/_all_docs", include_docs=True
-        )
+        running_notes_docs = self.application.cloudant.post_partition_all_docs(
+            db="running_notes", partition_key=partitionid, include_docs=True
+        ).get_result()["rows"]
         for row in running_notes_docs:
-            running_note = row.doc
+            running_note = row["doc"]
             note_contents = {}
             for item in [
                 "user",
@@ -53,7 +55,7 @@ class RunningNotesDataHandler(SafeHandler):
     def post(self, partition_id):
         data = tornado.escape.json_decode(self.request.body)
         note = data.get("note", "")
-        category = data.get("categories", [])
+        categories = data.get("categories", [])
         note_type = data.get("note_type", "")
         user = self.get_current_user()
         if not note:
@@ -62,13 +64,30 @@ class RunningNotesDataHandler(SafeHandler):
                 "<html><body>No project id or note parameters found</body></html>"
             )
         else:
+            if user.is_api_user:
+                user_email = data.get("email")
+                if user_email:
+                    user_details = self.get_user_details(self.application, user_email)
+                    if user_details:
+                        user_name = user_details.get("name")
+                    else:
+                        self.set_status(401)
+                        return self.write("Error: Invalid user")
+                else:
+                    self.set_status(401)
+                    return self.write("Error: Invalid user")
+
+            else:
+                user_name = user.name
+                user_email = user.email
+
             newNote = RunningNotesDataHandler.make_running_note(
                 self.application,
                 partition_id,
                 note,
-                category,
-                user.name,
-                user.email,
+                categories,
+                user_name,
+                user_email,
                 note_type,
             )
             self.set_status(201)
@@ -84,61 +103,84 @@ class RunningNotesDataHandler(SafeHandler):
         email,
         note_type,
         created_time=None,
+        parent=None,
     ):
         gen_log = logging.getLogger("tornado.general")
         if not created_time:
             created_time = datetime.datetime.now(datetime.timezone.utc)
+        note_details = {
+            "type": note_type,
+            "id": partition_id,
+        }
         if note_type == "project":
             connected_projects = [partition_id]
-            v = application.projects_db.view("project/project_id")
-            for row in v[partition_id]:
-                doc_id = row.value
-            doc = application.projects_db.get(doc_id)
+            doc = application.cloudant.post_view(
+                db="projects",
+                ddoc="project",
+                view="project_id",
+                key=partition_id,
+                include_docs=True,
+            ).get_result()["rows"][0]["doc"]
             project_name = doc["project_name"]
-            proj_ids = [partition_id, project_name]
+            library_method = doc["details"].get("library_construction_method", "")
+            note_details["name"] = project_name
+            note_details["library_method"] = library_method
             proj_coord_with_accents = ".".join(
                 doc["details"].get("project_coordinator", "").lower().split()
             )
-        elif note_type == "flowcell":
-            # get connected projects from fc db
-            flowcell_date, flowcell_id = partition_id.split("_")
-            # If the date has 8 digits, use only the last 6 for lookup
-            if len(flowcell_date) == 8:
-                flowcell_date = flowcell_date[2:]
-
-            flowcell_lookup_id = flowcell_date + "_" + flowcell_id
-
-            connected_projects = (
-                application.x_flowcells_db.view(
-                    "names/project_ids_list", key=flowcell_lookup_id
-                )
-                .rows[0]
-                .value
-            )
-        elif note_type == "flowcell_ont":
-            connected_projects = (
-                application.nanopore_runs_db.view(
-                    "names/project_ids_list", key=partition_id
-                )
-                .rows[0]
-                .value
-            )
         elif note_type == "workset":
-            values = (
-                application.worksets_db.view("worksets/project_list", key=partition_id)
-                .rows[0]
-                .value
-            )
+            values = application.cloudant.post_view(
+                db="worksets",
+                ddoc="worksets",
+                view="project_list",
+                key=partition_id,
+            ).get_result()["rows"][0]["value"]
             connected_projects = values["project_list"]
             workset_name = values["name"]
+            note_details["name"] = workset_name
+            if "Workset" not in categories:
+                categories.append("Workset")
+        else:
+            note_details["name"] = partition_id
+            if note_type == "flowcell":
+                # get connected projects from fc db
+                flowcell_date, flowcell_id = partition_id.split("_")
+                # If the date has 8 digits, use only the last 6 for lookup
+                if len(flowcell_date) == 8:
+                    flowcell_date = flowcell_date[2:]
+
+                flowcell_lookup_id = flowcell_date + "_" + flowcell_id
+                lookup_db = "x_flowcells"
+                lookup_key = flowcell_lookup_id
+            elif note_type == "flowcell_ont":
+                lookup_db = "nanopore_runs"
+                lookup_key = partition_id
+            elif note_type == "flowcell_element":
+                lookup_db = "element_runs"
+                lookup_key = partition_id
+            connected_projects = application.cloudant.post_view(
+                db=lookup_db,
+                ddoc="names",
+                view="project_ids_list",
+                key=lookup_key,
+            ).get_result()["rows"][0]["value"]
+            if "Flowcell" not in categories:
+                categories.append("Flowcell")
+
+        def clean_html_comments(text):
+            """Remove HTML comments from the text to prevent issues in slack notifications.
+            Does not remove multiline html comments
+            """
+            return re.sub(r"<!--.*?-->(\n)*", "", text)
+
         newNote = {
             "_id": f"{partition_id}:{datetime.datetime.timestamp(created_time)}",
             "user": user,
             "email": email,
-            "note": note,
+            "note": clean_html_comments(note),
             "categories": categories,
             "projects": connected_projects,
-            "parent": partition_id,
+            "parent": parent if parent else partition_id,
             "note_type": note_type,
             "created_at_utc": created_time.isoformat(),
             "updated_at_utc": created_time.isoformat(),
@@ -147,24 +189,36 @@ class RunningNotesDataHandler(SafeHandler):
         gen_log.info(
             f"Running note to be created with id {newNote['_id']} by {user} at {created_time.isoformat()}"
         )
-        application.running_notes_db.save(newNote)
-        #### Check and send mail to tagged users (for project running notes as flowcell and workset notes are copied over)
-        if note_type == "project":
-            pattern = re.compile("(@)([a-zA-Z0-9.-]+)")
-            userTags = [x[1] for x in pattern.findall(note)]
+
+        response = application.cloudant.post_document(
+            db="running_notes", document=newNote
+        ).get_result()
+
+        if not response.get("ok"):
+            gen_log.error(
+                f"Failed to create running note with id {newNote['_id']} by {user} at {created_time.isoformat()}"
+            )
+            raise Exception(f"Failed to create running note for {partition_id}")
+
+        #### Check and send mail to tagged users (for all running notes types)
+        #### except for project running notes that are copied from worksets and flowcells
+        pattern = re.compile("(@)([a-zA-Z0-9.-]+)")
+        userTags = [x[1] for x in pattern.findall(note)]
+        if not parent:
             if userTags:
                 RunningNotesDataHandler.notify_tagged_user(
                     application,
                     userTags,
-                    proj_ids,
-                    note,
+                    note_details,
+                    clean_html_comments(note),
                     categories,
                     user,
                     created_time,
                     "userTag",
                 )
-            ####
-            ##Notify proj coordinators for all project running notes
+        ####
+        ##Notify proj coordinators for all project running notes
+        if note_type == "project":
             proj_coord = (
                 unicodedata.normalize("NFKD", proj_coord_with_accents)
                 .encode("ASCII", "ignore")
@@ -178,52 +232,111 @@ class RunningNotesDataHandler(SafeHandler):
                 RunningNotesDataHandler.notify_tagged_user(
                     application,
                     [proj_coord],
-                    proj_ids,
-                    note,
+                    note_details,
+                    clean_html_comments(note),
                     categories,
                     user,
                     created_time,
                     "creation",
                 )
-        if note_type in ["flowcell", "workset", "flowcell_ont"]:
-            choose_link = {
-                "flowcell": "flowcells",
-                "workset": "workset",
-                "flowcell_ont": "flowcells_ont",
-            }
+        ##
+        # If the note is created on flowcell or workset, copy it to connected projects
+        if note_type in ["flowcell", "workset", "flowcell_ont", "flowcell_element"]:
             link_id = partition_id
             if note_type == "workset":
                 link_id = workset_name
-            link = f"<a class='text-decoration-none' href='/{choose_link[note_type]}/{link_id}'>{link_id}</a>"
-            project_note = (
+            link = f"<a class='text-decoration-none' href='{RunningNotesDataHandler.get_entity_link(application, note_type, link_id)}'>{link_id}</a>"
+            link_in_project_note = (
                 f"#####*Running note posted on {note_type.split('_')[0]} {link}:*\n"
             )
-            project_note += note
-            for proj_id in connected_projects:
-                _ = RunningNotesDataHandler.make_running_note(
-                    application,
-                    proj_id,
-                    project_note,
-                    categories,
-                    user,
-                    email,
-                    "project",
-                    created_time,
+            project_note = link_in_project_note + note
+            split_fc_notes = {}
+            if note_type in ["flowcell"]:
+                split_fc_notes = RunningNotesDataHandler.split_notes(
+                    project_note, connected_projects
                 )
-        created_note = application.running_notes_db.get(newNote["_id"])
+            for proj_id in connected_projects:
+                submitted_note = ""
+                if note_type in ["flowcell"]:
+                    if proj_id in split_fc_notes:
+                        submitted_note = split_fc_notes[proj_id]
+                    elif split_fc_notes["common"] != link_in_project_note:
+                        submitted_note = split_fc_notes["common"]
+                else:
+                    submitted_note = project_note
+
+                if submitted_note:
+                    _ = RunningNotesDataHandler.make_running_note(
+                        application,
+                        proj_id,
+                        submitted_note,
+                        categories,
+                        user,
+                        email,
+                        "project",
+                        created_time,
+                        parent=partition_id,
+                    )
+        created_note = application.cloudant.get_document(
+            db="running_notes", doc_id=newNote["_id"]
+        ).get_result()
+        created_note = newNote
         return created_note
 
     @staticmethod
+    def split_notes(note, connected_projects):
+        # <!-- START:P6510 -->
+        START_RE = re.compile(r"<!--\s*START:(P\d+)\s*-->")
+        END_RE = re.compile(r"<!--\s*END:(P\d+)\s*-->")
+        projects_in_sections = set(re.findall(r"START:(P\d+)", note))
+        project_notes = {
+            proj: "" for proj in projects_in_sections if proj in connected_projects
+        }
+        project_notes["common"] = ""
+        current_proj = None
+        for line in note.split("\n"):
+            start_match = START_RE.search(line)
+            end_match = END_RE.search(line)
+            if start_match:
+                current_proj = start_match.group(1)
+                continue
+            elif end_match:
+                current_proj = None
+                continue
+
+            if current_proj and current_proj in project_notes:
+                project_notes[current_proj] += line + "\n"
+            else:
+                for proj in project_notes:
+                    project_notes[proj] += line + "\n"
+
+        return project_notes
+
+    @staticmethod
+    def get_entity_link(application, note_type, entity_id):
+        base_url = application.settings["redirect_uri"].rsplit("/", 1)[0]
+        choose_link = {
+            "flowcell": "flowcells",
+            "workset": "workset",
+            "flowcell_ont": "flowcells_ont",
+            "flowcell_element": "flowcells_element",
+            "project": "project",
+        }
+        return f"{base_url}/{choose_link[note_type]}/{entity_id}"
+
+    @staticmethod
     def notify_tagged_user(
-        application, userTags, project, note, categories, tagger, timestamp, tagtype
+        application, userTags, entity, note, categories, tagger, timestamp, tagtype
     ):
         view_result = {}
-        project_id = project[0]
-        project_name = project[1]
+        entity_type = entity["type"]
+        entity_id = entity["id"]
+        entity_name = entity["name"]
+        library_method = entity["library_method"] if "library_method" in entity else ""
         time_in_format = timestamp.astimezone().strftime("%a %b %d %Y, %I:%M:%S %p")
         note_id = (
             "running_note_"
-            + project_id
+            + entity_id
             + "_"
             + str(
                 int(
@@ -234,9 +347,14 @@ class RunningNotesDataHandler(SafeHandler):
                 )
             )
         )
-        for row in application.gs_users_db.view("authorized/users"):
-            if row.key != "genstat_defaults":
-                view_result[row.key.split("@")[0]] = row.key
+        for row in application.cloudant.post_view(
+            db="gs_users",
+            ddoc="authorized",
+            view="users",
+            keys=[x + "@scilifelab.se" for x in userTags],
+            include_docs=True,
+        ).get_result()["rows"]:
+            view_result[row["key"]] = row["doc"].get("notification_preferences", "Both")
         category = ""
         if categories:
             category = " - " + ", ".join(categories)
@@ -250,114 +368,88 @@ class RunningNotesDataHandler(SafeHandler):
             slack_notf_text = f"Running note created by *{tagger}*"
             email_text = f"Running note created by {tagger}"
 
-        for user in userTags:
-            if user in view_result:
-                option = SafeHandler.get_user_details(
-                    application, view_result[user]
-                ).get("notification_preferences", "Both")
-                # Adding a slack IM to the tagged user with the running note
-                if option == "Slack" or option == "Both":
-                    nest_asyncio.apply()
-                    client = slack_sdk.WebClient(token=application.slack_token)
-                    notification_text = (
-                        f"{tagger} has {notf_text} in {project_id}, {project_name}!"
+        context = {
+            "slack_notf_text": slack_notf_text,
+            "email_text": email_text,
+            "note_link": f"{RunningNotesDataHandler.get_entity_link(application, entity_type, entity_id)}#running_note_{note_id}",
+            "entity": entity_type.split("_")[0],
+            "entity_id": f"{entity_id}, {entity_name}"
+            if "project" in entity_type
+            else entity_name,
+            "entity_specific_info": f"[{library_method}]" if library_method else "",
+            "tagger": tagger,
+            "time_in_format": time_in_format,
+            "category": category,
+        }
+        template_doc = application.cloudant.get_document(
+            db="gs_configs", doc_id="rn_templates"
+        ).get_result()
+
+        for user in view_result:
+            option = view_result[user]
+            # Adding a slack IM to the tagged user with the running note
+            if option == "Slack" or option == "Both":
+                nest_asyncio.apply()
+                client = slack_sdk.WebClient(token=application.slack_token)
+                notification_text = (
+                    f"{tagger} has {notf_text} in {context['entity_id']}!"
+                )
+                blocks_json_str = json.dumps(template_doc["slack"]["blocks"])
+                escape_note_for_json = json.dumps(note.replace("\n", "\n>"))[1:-1]
+                rendered_json_str = (
+                    Template(blocks_json_str, autoescape=None)
+                    .generate(slack_note=escape_note_for_json, **context)
+                    .decode()
+                )
+                blocks = json.loads(rendered_json_str)
+
+                try:
+                    userid = client.users_lookupByEmail(email=user)
+                    channel = client.conversations_open(users=userid.data["user"]["id"])
+                    client.chat_postMessage(
+                        channel=channel.data["channel"]["id"],
+                        text=notification_text,
+                        blocks=blocks,
                     )
-                    blocks = [
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": (
-                                    "_{} for the project_ "
-                                    "<{}/project/{}#{}|{}, {}>! :smile: \n_The note is as follows:_ \n\n\n"
-                                ).format(
-                                    slack_notf_text,
-                                    application.settings["redirect_uri"].rsplit("/", 1)[
-                                        0
-                                    ],
-                                    project_id,
-                                    note_id,
-                                    project_id,
-                                    project_name,
-                                ),
-                            },
-                        },
-                        {
-                            "type": "section",
-                            "text": {
-                                "type": "mrkdwn",
-                                "text": ">*{} - {}{}*\n>{}\n\n\n\n _(Please do not respond to this message here in Slack."
-                                " It will only be seen by you.)_".format(
-                                    tagger,
-                                    time_in_format,
-                                    category,
-                                    note.replace("\n", "\n>"),
-                                ),
-                            },
-                        },
-                    ]
+                    client.conversations_close(channel=channel.data["channel"]["id"])
+                except Exception:
+                    # falling back to email
+                    option = "E-mail"
 
-                    try:
-                        userid = client.users_lookupByEmail(email=view_result[user])
-                        channel = client.conversations_open(
-                            users=userid.data["user"]["id"]
-                        )
-                        client.chat_postMessage(
-                            channel=channel.data["channel"]["id"],
-                            text=notification_text,
-                            blocks=blocks,
-                        )
-                        client.conversations_close(
-                            channel=channel.data["channel"]["id"]
-                        )
-                    except Exception:
-                        # falling back to email
-                        option = "E-mail"
-
-                # default is email
-                if option == "E-mail" or option == "Both":
-                    msg = MIMEMultipart("alternative")
-                    msg["Subject"] = (
-                        f"[GenStat] Running Note:{project_id}, {project_name}"
+            # default is email
+            if option == "E-mail" or option == "Both":
+                email_subject = (
+                    Template(template_doc["email"]["subject"])
+                    .generate(**context)
+                    .decode()
+                )
+                email_text = (
+                    Template(template_doc["email"]["text"])
+                    .generate(note=note, **context)
+                    .decode()
+                )
+                sanitizer = Sanitizer()
+                email_html = (
+                    Template(template_doc["email"]["html"])
+                    .generate(
+                        markdown_note=sanitizer.sanitize(
+                            markdown.markdown(note, extensions=["nl2br"])
+                        ),
+                        **context,
                     )
-                    msg["From"] = "genomics-status"
-                    msg["To"] = view_result[user]
-                    text = f"{email_text} in the project {project_id}, {project_name}! The note is as follows\n\
-                    >{tagger} - {time_in_format}{category}\
-                    >{note}"
+                    .decode()
+                )
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = email_subject
+                msg["From"] = "genomics-status"
+                msg["To"] = user
 
-                    html = '<html>\
-                    <body>\
-                    <p> \
-                    {} in the project <a href="{}/project/{}#{}">{}, {}</a>! The note is as follows</p>\
-                    <blockquote>\
-                    <div class="panel panel-default" style="border: 1px solid #e4e0e0; border-radius: 4px;">\
-                    <div class="panel-heading" style="background-color: #f5f5f5; padding: 10px 15px;">\
-                        <a href="#">{}</a> - <span>{}</span> <span>{}</span>\
-                    </div>\
-                    <div class="panel-body" style="padding: 15px;">\
-                        <p>{}</p>\
-                    </div></div></blockquote></body></html>'.format(
-                        email_text,
-                        application.settings["redirect_uri"].rsplit("/", 1)[0],
-                        project_id,
-                        note_id,
-                        project_id,
-                        project_name,
-                        tagger,
-                        time_in_format,
-                        category,
-                        markdown.markdown(note),
-                    )
+                msg.attach(MIMEText(email_text, "plain"))
+                msg.attach(MIMEText(email_html, "html"))
 
-                    msg.attach(MIMEText(text, "plain"))
-                    msg.attach(MIMEText(html, "html"))
-
-                    s = smtplib.SMTP("localhost")
-                    s.sendmail(
-                        "genomics-bioinfo@scilifelab.se", msg["To"], msg.as_string()
-                    )
-                    s.quit()
+                s = smtplib.SMTP("localhost")
+                s.sendmail("genomics-bioinfo@scilifelab.se", msg["To"], msg.as_string())
+                s.quit()
 
 
 class LatestStickyNoteHandler(SafeHandler):
@@ -367,11 +459,16 @@ class LatestStickyNoteHandler(SafeHandler):
 
     def get(self, partitionid):
         self.set_header("Content-type", "application/json")
-        latest_sticky_doc = self.application.running_notes_db.view(
-            "note_types/sticky_notes", partition=partitionid, descending=True, limit=1
-        ).rows
+        latest_sticky_doc = self.application.cloudant.post_partition_view(
+            db="running_notes",
+            ddoc="note_types",
+            view="sticky_notes",
+            partition_key=partitionid,
+            descending=True,
+            limit=1,
+        ).get_result()["rows"]
         if latest_sticky_doc:
-            latest_sticky_note = latest_sticky_doc[0].value
+            latest_sticky_note = latest_sticky_doc[0]["value"]
             self.write({latest_sticky_note["created_at_utc"]: latest_sticky_note})
 
 
@@ -388,14 +485,16 @@ class LatestStickyNotesMultipleHandler(SafeHandler):
             return self.write("Error: no project_ids supplied")
 
         project_ids = data["project_ids"]
-        latest_sticky_notes = self.application.running_notes_db.view(
-            "latest_sticky_note_previews/project",
+        latest_sticky_notes = self.application.cloudant.post_view(
+            db="running_notes",
+            ddoc="latest_sticky_note_previews",
+            view="project",
             keys=project_ids,
             reduce=True,
             group=True,
-        ).rows
+        ).get_result()["rows"]
         latest_sticky_notes = {
-            row.key: row.value for row in latest_sticky_notes if row.value
+            row["key"]: row["value"] for row in latest_sticky_notes if row["value"]
         }
         self.set_header("Content-type", "application/json")
         self.write(latest_sticky_notes)
@@ -448,11 +547,16 @@ class LatestRunningNoteHandler(SafeHandler):
     @staticmethod
     def get_latest_running_note(app, note_type, partition_id):
         latest_note = {}
-        view = app.running_notes_db.view(
-            f"latest_note_previews/{note_type}", reduce=True
-        )
-        if view[partition_id].rows:
-            note = view[partition_id].rows[0].value
+        view = app.cloudant.post_view(
+            db="running_notes",
+            ddoc="latest_note_previews",
+            view=note_type,
+            start_key=partition_id,
+            end_key=partition_id,
+            reduce=True,
+        ).get_result()
+        if view["rows"]:
+            note = view["rows"][0]["value"]
             latest_note = {note["created_at_utc"]: note}
 
         return latest_note
@@ -461,3 +565,24 @@ class LatestRunningNoteHandler(SafeHandler):
     def formatDate(date):
         datestr = datetime.datetime.fromisoformat(date).astimezone()
         return datestr.strftime("%a %b %d %Y, %H:%M:%S")
+
+
+class InvoicingNotesHandler(SafeHandler):
+    """Serves the invoicing running notes for a given project.
+    URL: /api/v1/invoicing_notes/([^/]*)
+    """
+
+    def get(self, partitionid):
+        self.set_header("Content-type", "application/json")
+        result_rows = self.application.cloudant.post_partition_view(
+            db="running_notes",
+            ddoc="note_types",
+            view="invoicing_notes",
+            partition_key=partitionid,
+            descending=True,
+        ).get_result()["rows"]
+        if result_rows:
+            invoicing_notes = []
+            for note in result_rows:
+                invoicing_notes.append(note["value"])
+            self.write({"invoicing_notes": invoicing_notes})

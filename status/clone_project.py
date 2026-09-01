@@ -1,10 +1,12 @@
-import re
-
 import requests
 from genologics import lims
 from genologics.config import BASEURI, PASSWORD, USERNAME
 from genologics.entities import Project
 
+from status.project_creation import (
+    ProjectCreationDataHandler,
+    ProjectEditingDataHandler,
+)
 from status.util import SafeHandler
 
 
@@ -28,32 +30,23 @@ class LIMSProjectCloningHandler(SafeHandler):
     """
 
     def get(self, project_identifier):
-        # Check if the project_identifier matches a project id.
-        # If not, assuming it's a project name, try to get the project id from the project name,
-        # since the LIMS API only accepts project ids
-        if not re.match("^(P[0-9]{3,7})", project_identifier):
-            try:
-                projectid = (
-                    self.application.projects_db.view("projects/name_to_id")[
-                        project_identifier
-                    ]
-                    .rows[0]
-                    .value
-                )
-            except IndexError:
-                self.set_status(404)
-                return self.write({"error": "Project not found"})
-        else:
-            projectid = project_identifier
+        projectid = ProjectEditingDataHandler.get_project_id(
+            self.application.cloudant, project_identifier
+        )
+        if not projectid:
+            self.set_status(404)
+            return self.write({"error": "Project not found"})
+
         proj_values = self.get_project_data_from_lims(projectid, "get")
         if not proj_values:
             self.set_status(404)
             self.write({"error": "Project not found"})
             return
+
         self.set_header("Content-type", "application/json")
         self.write(proj_values)
 
-    def post(self, projectid):
+    def post(self, project_identifier):
         if not (
             self.get_current_user().is_proj_coord
             or self.get_current_user().is_any_admin
@@ -62,6 +55,13 @@ class LIMSProjectCloningHandler(SafeHandler):
             return self.write(
                 "Error: You do not have the permissions for this operation!"
             )
+
+        projectid = ProjectEditingDataHandler.get_project_id(
+            self.application.cloudant, project_identifier
+        )
+        if not projectid:
+            self.set_status(404)
+            return self.write({"error": "Project not found"})
 
         new_proj = self.get_project_data_from_lims(projectid, "post")
         if "error" in new_proj:
@@ -72,8 +72,8 @@ class LIMSProjectCloningHandler(SafeHandler):
         self.set_status(201)
         self.write(new_proj)
 
-    def get_project_data_from_lims(self, projectid, type):
-        copy_udfs = {
+    def get_project_data_from_lims(self, projectid, req_type):
+        copy_udfs = [
             "Customer project reference",
             "Project Comment",
             "Type",
@@ -107,7 +107,7 @@ class LIMSProjectCloningHandler(SafeHandler):
             "PhiX spike-in (percent)",
             "Flowcell option",
             "Ethics permit number",
-        }
+        ]
 
         lims_instance = lims.Lims(BASEURI, USERNAME, PASSWORD)
         uri = lims_instance.get_uri(f"projects/{projectid}")
@@ -128,7 +128,7 @@ class LIMSProjectCloningHandler(SafeHandler):
                 udfs[udf] = existing_project.udf[udf]
         proj_values["udfs"] = udfs
 
-        if type == "get":
+        if req_type == "get":
             return proj_values
 
         else:
@@ -138,14 +138,7 @@ class LIMSProjectCloningHandler(SafeHandler):
             if check_if_new_name_exists:
                 return {"error": f"A project with the name {new_name} already exists"}
 
-            try:
-                new_project = Project.create(
-                    lims_instance,
-                    udfs=proj_values["udfs"],
-                    name=new_name,
-                    researcher=existing_project.researcher,
-                )
-            except requests.exceptions.HTTPError as e:
-                return {"error": e.message}
+            proj_values["name"] = new_name
+            proj_values["researcher"] = existing_project.researcher
 
-            return {"project_id": new_project.id, "project_name": new_project.name}
+            return ProjectCreationDataHandler.create_project_in_lims(proj_values)

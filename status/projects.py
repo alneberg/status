@@ -5,6 +5,7 @@ import datetime
 import itertools
 import json
 import logging
+import re
 from collections import OrderedDict
 
 import dateutil.parser
@@ -13,9 +14,18 @@ import tornado.web
 from dateutil.relativedelta import relativedelta
 from genologics import lims
 from genologics.config import BASEURI, PASSWORD, USERNAME
-from genologics.entities import Artifact, Project
+from genologics.entities import Artifact
+from ibm_cloud_sdk_core.api_exception import ApiException
 from zenpy import ZenpyException
 
+from status.flowcells import ReadsTotalDataHandler
+from status.reports import (
+    MultiQCReportHandler,
+    ProjectSummaryReportHandler,
+    SingleCellSampleSummaryReportHandler,
+    VisiumReportHandler,
+)
+from status.time_tracking import stage_definitions
 from status.util import SafeHandler, dthandler
 
 lims = lims.Lims(BASEURI, USERNAME, PASSWORD)
@@ -67,7 +77,9 @@ class PresetsHandler(SafeHandler):
                 doc["userpreset"][preset_filter]["FILTER"] = data
 
         try:
-            self.application.gs_users_db.save(doc)
+            self.application.cloudant.put_document(
+                db="gs_users", doc_id=doc["_id"], document=doc
+            )
         except Exception as e:
             self.set_status(400)
             self.write(e.message)
@@ -98,7 +110,9 @@ class PresetsOnLoadHandler(PresetsHandler):
         doc["onload"] = data
 
         try:
-            self.application.gs_users_db.save(doc)
+            self.application.cloudant.put_document(
+                db="gs_users", doc_id=doc["_id"], document=doc
+            )
         except Exception as e:
             self.set_status(400)
             self.write(e.message)
@@ -123,48 +137,51 @@ class ProjectsBaseDataHandler(SafeHandler):
         # and project_summary key gives 'temporary' udfs that will move to 'details'.
         # Include these as normal key:value pairs
         field_sources = {}  # A dictionary to keep track of where the fields come from
-        if "field_sources" in row.value:
-            field_sources = row.value["field_sources"]
-        if "project_summary" in row.value:
-            for summary_key, summary_value in row.value["project_summary"].items():
-                row.value[summary_key] = summary_value
+        if "field_sources" in row["value"]:
+            field_sources = row["value"]["field_sources"]
+        if "project_summary" in row["value"]:
+            for summary_key, summary_value in row["value"]["project_summary"].items():
+                row["value"][summary_key] = summary_value
                 field_sources[summary_key] = "Project Summary Process"
-            row.value.pop("project_summary", None)
+            row["value"].pop("project_summary", None)
 
         # If key is in both project_summary and details, details has precedence
-        if "details" in row.value:
-            for detail_key, detail_value in row.value["details"].items():
-                row.value[detail_key] = detail_value
+        if "details" in row["value"]:
+            for detail_key, detail_value in row["value"]["details"].items():
+                row["value"][detail_key] = detail_value
                 field_sources[detail_key] = f"Project Level UDF: {detail_key}"
-            row.value.pop("details", None)
+            row["value"].pop("details", None)
 
         # Handle the pending reviews:
-        if "pending_reviews" in row.value:
+        if "pending_reviews" in row["value"]:
             links = ", ".join(
                 [
                     f'<a class="text-decoration-none" href="{BASEURI}/clarity/work-complete/{rid[0]}">{rid[1]} requested review from {rid[2]}</a>'
-                    for rid in row.value["pending_reviews"]
+                    for rid in row["value"]["pending_reviews"]
                 ]
             )
-            row.value["pending_reviews"] = links
+            row["value"]["pending_reviews"] = links
             field_sources["pending_reviews"] = (
                 "LIMS escalation, formatted by Genomics Status (backend)"
             )
 
-        ord_det = row.value.get("order_details", {})
+        ord_det = row["value"].get("order_details", {})
         # Try to fetch a name for the contact field, not just an e-mail
         field_sources["emails"] = {}
-        if "contact" in row.value and row.value.get("contact", ""):
-            if "owner" in ord_det and row.value["contact"] == ord_det["owner"]["email"]:
-                row.value["contact"] = (
+        if "contact" in row["value"] and row["value"].get("contact", ""):
+            if (
+                "owner" in ord_det
+                and row["value"]["contact"] == ord_det["owner"]["email"]
+            ):
+                row["value"]["contact"] = (
                     ord_det["owner"]["name"] + ": " + ord_det["owner"]["email"]
                 )
                 field_sources["contact"] = (
                     "Either from LIMS or Order Portal (Owner), formatted by Genomics Status (backend). For this project it's from Order Portal."
                 )
             elif "fields" in ord_det:
-                if row.value["contact"] == ord_det["fields"]["project_lab_email"]:
-                    row.value["contact"] = (
+                if row["value"]["contact"] == ord_det["fields"]["project_lab_email"]:
+                    row["value"]["contact"] = (
                         ord_det["fields"]["project_lab_name"]
                         + ": "
                         + ord_det["fields"]["project_lab_email"]
@@ -172,8 +189,8 @@ class ProjectsBaseDataHandler(SafeHandler):
                     field_sources["contact"] = (
                         "Either from LIMS or Order Portal (Owner), formatted by Genomics Status (backend). For this project it's from LIMS (lab email)"
                     )
-                elif row.value["contact"] == ord_det["fields"]["project_pi_email"]:
-                    row.value["contact"] = (
+                elif row["value"]["contact"] == ord_det["fields"]["project_pi_email"]:
+                    row["value"]["contact"] = (
                         ord_det["fields"]["project_pi_name"]
                         + ": "
                         + ord_det["fields"]["project_pi_email"]
@@ -183,55 +200,55 @@ class ProjectsBaseDataHandler(SafeHandler):
                     )
         # The status "open" is added here since this method is reused with only the statuses open/closed.
         if (
-            row.key[0] in ["review", "ongoing", "reception control", "open"]
-            and "queued" in row.value
+            row["key"][0] in ["review", "ongoing", "reception control", "open"]
+            and "queued" in row["value"]
         ):
             # Add days ongoing in production field
             now = datetime.datetime.now()
-            queued = row.value["queued"]
+            queued = row["value"]["queued"]
             diff = now - dateutil.parser.parse(queued)
-            row.value["days_in_production"] = diff.days
+            row["value"]["days_in_production"] = diff.days
             field_sources["days_in_production"] = (
                 "Number of days from queue date until close/aborted date, or until today. Calculated by Genomics Status (backend). For this project it's until today."
             )
-        elif row.key[0] in ["aborted", "closed"] and "queued" in row.value:
+        elif row["key"][0] in ["aborted", "closed"] and "queued" in row["value"]:
             # Days project was in production
-            if "close_date" in row.value:
-                close = dateutil.parser.parse(row.value["close_date"])
+            if "close_date" in row["value"]:
+                close = dateutil.parser.parse(row["value"]["close_date"])
             else:
-                close = dateutil.parser.parse(row.value["aborted"])
-            diff = close - dateutil.parser.parse(row.value["queued"])
-            row.value["days_in_production"] = diff.days
+                close = dateutil.parser.parse(row["value"]["aborted"])
+            diff = close - dateutil.parser.parse(row["value"]["queued"])
+            row["value"]["days_in_production"] = diff.days
             field_sources["days_in_production"] = (
                 "Number of days from queue date until close/aborted date, or until today. Calculated by Genomics Status (backend). For this project it's until close/aborted date."
             )
         if (
-            row.key[0] in ["review", "ongoing", "reception control"]
-            and "open_date" in row.value
+            row["key"][0] in ["review", "ongoing", "reception control"]
+            and "open_date" in row["value"]
         ):
             end_date = datetime.datetime.now()
-            if "queued" in row.value:
-                end_date = dateutil.parser.parse(row.value["queued"])
-            diff = (end_date - dateutil.parser.parse(row.value["open_date"])).days
-            if "queued" not in row.value and diff > 14:
-                row.value["days_in_reception_control"] = (
+            if "queued" in row["value"]:
+                end_date = dateutil.parser.parse(row["value"]["queued"])
+            diff = (end_date - dateutil.parser.parse(row["value"]["open_date"])).days
+            if "queued" not in row["value"] and diff > 14:
+                row["value"]["days_in_reception_control"] = (
                     f'<b class="text-error">{diff}</b>'
                 )
             else:
-                row.value["days_in_reception_control"] = diff
+                row["value"]["days_in_reception_control"] = diff
             field_sources["days_in_reception_control"] = (
                 "Number of days between open date and queue date. If not queued yet, days between open date and today. Calculated by Genomics Status (backend)"
             )
 
         if ord_det and "fields" in ord_det:
             if "project_pi_name" in ord_det["fields"]:
-                row.value["project_pi_name"] = ord_det["fields"]["project_pi_name"]
+                row["value"]["project_pi_name"] = ord_det["fields"]["project_pi_name"]
                 # if there is a PI e-mail, add it
                 if "project_pi_email" in ord_det["fields"] and ord_det["fields"].get(
                     "project_pi_email", ""
                 ):
-                    row.value["project_pi_name"] = (
-                        row.value["project_pi_name"]
+                    row["value"]["project_pi_name"] = (
+                        row["value"]["project_pi_name"]
                         + ": "
                         + ord_det["fields"]["project_pi_email"]
                     )
@@ -239,7 +256,7 @@ class ProjectsBaseDataHandler(SafeHandler):
                 "PI Email, from Order Portal, formatted by Genomics Status (backend)"
             )
             if "project_bx_email" in ord_det["fields"]:
-                row.value["project_bx_email"] = ord_det["fields"]["project_bx_email"]
+                row["value"]["project_bx_email"] = ord_det["fields"]["project_bx_email"]
             field_sources["project_bx_email"] = (
                 "Email to project bioinformatics responsible, from Order Portal"
             )
@@ -272,24 +289,24 @@ class ProjectsBaseDataHandler(SafeHandler):
         openflag = False
         projtype = self.get_argument("type", "all")
 
+        dates_gen = [
+            "days_recep_ctrl",
+            "days_analysis",
+            "days_data_delivery",
+            "days_close",
+        ]
         def_dates_gen = {
-            "days_recep_ctrl": ["open_date", "queued"],
-            "days_analysis": [
-                "all_samples_sequenced",
-                "best_practice_analysis_completed",
-            ],
-            "days_data_delivery": ["all_samples_sequenced", "all_raw_data_delivered"],
-            "days_close": ["all_raw_data_delivered", "close_date"],
+            k[1]: v for k, v in stage_definitions.items() if k[1] in dates_gen
         }
 
+        dates_summary = [
+            "days_prep_start",
+            "days_seq_start",
+            "days_seq",
+            "days_prep",
+        ]
         def_dates_summary = {
-            "days_prep_start": ["queued", "library_prep_start"],
-            "days_seq_start": [
-                ["qc_library_finished", "queued"],
-                "sequencing_start_date",
-            ],
-            "days_seq": ["sequencing_start_date", "all_samples_sequenced"],
-            "days_prep": ["library_prep_start", "qc_library_finished"],
+            k[1]: v for k, v in stage_definitions.items() if k[1] in dates_summary
         }
 
         if "closed" in filter_projects or "all" in filter_projects:
@@ -320,8 +337,13 @@ class ProjectsBaseDataHandler(SafeHandler):
             end_queue_date,
             start_close_date,
             end_close_date,
-        ) = [None] * 6
+            start_aborted_date,
+            end_aborted_date,
+        ) = [None] * 8
 
+        if "aborted" in filter_projects:
+            end_aborted_date = self.get_argument("youngest_aborted_date", "")
+            start_aborted_date = self.get_argument("oldest_aborted_date", "")
         if closedflag:
             end_close_date = self.get_argument("youngest_close_date", default_end_date)
             start_close_date = self.get_argument(
@@ -338,17 +360,13 @@ class ProjectsBaseDataHandler(SafeHandler):
                 "oldest_open_date", self._get_two_year_from(end_open_date)
             )
 
-        summary_view = self.application.projects_db.view(
-            "project/summary_status", descending=True
-        )
-
-        # view_calls collects http requests to statusdb for each status requested
+        # view_calls collects results lists for each status requested
         view_calls = []
         if filter_projects[:1] != "P":
+            statusdb_statuses = set()
             if "all" in filter_projects:
-                view_calls.append(summary_view)
+                statusdb_statuses.add("all")
             else:
-                statusdb_statuses = set()
                 # Need special treatment for these as they are not actual statuses
                 if "review" in filter_projects or "open" in filter_projects:
                     statusdb_statuses.add("ongoing")
@@ -364,8 +382,23 @@ class ProjectsBaseDataHandler(SafeHandler):
                     ]:
                         statusdb_statuses.add(status)
 
-                for status in statusdb_statuses:
-                    view_calls.append(summary_view[[status, "Z"] : [status, ""]])
+            for status in statusdb_statuses:
+                if status == "all":
+                    # Get all projects, regardless of status
+                    start_key = None
+                    end_key = None
+                else:
+                    start_key = [status, "Z"]
+                    end_key = [status, ""]
+                summary_view = self.application.cloudant.post_view(
+                    db="projects",
+                    ddoc="project",
+                    view="summary_status",
+                    descending=True,
+                    start_key=start_key,
+                    end_key=end_key,
+                ).get_result()["rows"]
+                view_calls.append(summary_view)
 
         filtered_projects = []
 
@@ -381,8 +414,11 @@ class ProjectsBaseDataHandler(SafeHandler):
         else:
             # Loop over each row from the different view calls
             for row in itertools.chain.from_iterable(view_calls):
-                p_info = row.value
+                p_info = row["value"]
                 ptype = p_info["details"].get("type")
+                # This is in case the project is closed, but the closed condition is not met, e.g. if the close date is outside the requested range.
+                # In that case, we don't want to include the project in the list of open projects.
+                is_closed_project = False
 
                 if not (projtype == "All" or ptype == projtype):
                     continue
@@ -392,6 +428,7 @@ class ProjectsBaseDataHandler(SafeHandler):
                 ] * 4
 
                 if "close_date" in p_info:
+                    is_closed_project = True
                     closed_condition = p_info["close_date"] >= str(
                         start_close_date
                     ) and p_info["close_date"] <= str(end_close_date)
@@ -425,7 +462,16 @@ class ProjectsBaseDataHandler(SafeHandler):
                         and "aborted" in p_info["project_summary"]
                     )
                 ):
-                    filtered_projects.append(row)
+                    if end_aborted_date and start_aborted_date:
+                        aborted_date = p_info["details"].get("aborted")
+                        if not aborted_date and "project_summary" in p_info:
+                            aborted_date = p_info["project_summary"].get("aborted")
+                        if aborted_date >= str(
+                            start_aborted_date
+                        ) and aborted_date <= str(end_aborted_date):
+                            filtered_projects.append(row)
+                    else:
+                        filtered_projects.append(row)
                 # pending reviews projects
                 elif (
                     "review" in filter_projects or filter_projects == "all"
@@ -438,7 +484,7 @@ class ProjectsBaseDataHandler(SafeHandler):
                 elif openflag and open_condition:
                     if filter_projects == "all":
                         filtered_projects.append(row)
-                    elif "open" in filter_projects:
+                    elif "open" in filter_projects and not is_closed_project:
                         filtered_projects.append(row)
                     # ongoing projects
                     elif (
@@ -464,10 +510,10 @@ class ProjectsBaseDataHandler(SafeHandler):
         final_projects = OrderedDict()
         for row in filtered_projects:
             row, _ = self.project_summary_data(row)
-            proj_id = row.key[1]
+            proj_id = row["key"][1]
 
-            final_projects[proj_id] = row.value
-            for date_type, date in row.value["summary_dates"].items():
+            final_projects[proj_id] = row["value"]
+            for date_type, date in row["value"]["summary_dates"].items():
                 final_projects[proj_id][date_type] = date
 
             for key, value in def_dates_gen.items():
@@ -511,24 +557,42 @@ class ProjectsBaseDataHandler(SafeHandler):
             list(final_projects.keys())[i : i + 200]
             for i in range(0, len(final_projects.keys()), 200)
         ]
-        for slice in slices:
-            projects_with_agreements = self.application.agreements_db.view(
-                "project/project_id", descending=True, keys=slice
-            )
+        for a_slice in slices:
+            projects_with_agreements = self.application.cloudant.post_view(
+                db="agreements",
+                ddoc="project",
+                view="project_id",
+                descending=True,
+                keys=a_slice,
+            ).get_result()["rows"]
             for row in projects_with_agreements:
-                final_projects[row.key]["has_agreements"] = True
+                final_projects[row["key"]]["has_agreements"] = True
 
         # Get Latest running note
-        notes = self.application.running_notes_db.view(
-            "latest_note_previews/project",
+        notes = self.application.cloudant.post_view(
+            db="running_notes",
+            ddoc="latest_note_previews",
+            view="project",
             reduce=True,
             group=True,
             keys=list(final_projects.keys()),
-        )
+        ).get_result()["rows"]
         for row in notes:
-            final_projects[row.key]["latest_running_note"] = json.dumps(
-                {row.value["created_at_utc"]: row.value}
+            final_projects[row["key"]]["latest_running_note"] = json.dumps(
+                {row["value"]["created_at_utc"]: row["value"]}
             )
+
+        # Get people assignments
+        people_assignments_view_result = self.application.cloudant.post_view(
+            db="people_assignments",
+            ddoc="current",
+            view="assignments",
+            keys=list(final_projects.keys()),
+        ).get_result()
+
+        for row in people_assignments_view_result.get("rows", []):
+            final_projects[row["id"]]["people_assigned"] = row["value"]
+
         return final_projects
 
     def list_project_fields(self, undefined=False, project_list="all"):
@@ -556,14 +620,7 @@ class ProjectsBaseDataHandler(SafeHandler):
             ProjectsBaseDataHandler.cached_search_list is None
             or ProjectsBaseDataHandler.search_list_last_fetched < t_threshold
         ):
-            projects_view = self.application.projects_db.view(
-                "projects/name_to_id_cust_ref", descending=True
-            )
-
-            ProjectsBaseDataHandler.cached_search_list = [
-                (row.key, row.value) for row in projects_view
-            ]
-            ProjectsBaseDataHandler.search_list_last_fetched = datetime.datetime.now()
+            self.update_projects_cache()
 
         search_string = search_string.lower().strip()
 
@@ -581,7 +638,28 @@ class ProjectsBaseDataHandler(SafeHandler):
                 }
                 projects.append(project)
 
+        # Sort projects by project number so that the latest P-number is first
+        projects = sorted(
+            projects,
+            key=lambda x: int(x["name"].split(",")[0].replace("P", "")),
+            reverse=True,
+        )
+
         return projects
+
+    def update_projects_cache(self):
+        # Update of cached project search list
+        projects_view = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="projects",
+            view="name_to_id_cust_ref",
+            descending=True,
+        ).get_result()["rows"]
+
+        ProjectsBaseDataHandler.cached_search_list = [
+            (row["key"], row["value"]) for row in projects_view
+        ]
+        ProjectsBaseDataHandler.search_list_last_fetched = datetime.datetime.now()
 
 
 def prettify_css_names(s):
@@ -627,6 +705,69 @@ class ProjectsSearchHandler(ProjectsBaseDataHandler):
         self.write(json.dumps(self.search_project_names(search_string)))
 
 
+class ProjectReadsSequencedHandler(ProjectsBaseDataHandler):
+    """Serves the total number of reads sequenced for a given project.
+
+    Loaded through /api/v1/project_reads_sequenced/([^/]*)$
+    """
+
+    def get(self, project):
+        view_rows = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view="summary",
+            keys=[["open", project], ["closed", project]],
+        ).get_result()["rows"]
+        if not len(view_rows) == 1:
+            return {}
+
+        summary_row = view_rows[0]
+        self.set_header("Content-type", "application/json")
+        all_reads = ReadsTotalDataHandler.get_total_reads(self.application, project)
+        reads_sum = 0
+        for flowcells in all_reads.values():
+            for flowcell in flowcells:
+                # Include all non-failed samples, even if they don't have a sample_status
+                if flowcell.get("sample_status", {}) not in ["Failed"]:
+                    reads_sum += flowcell["cl"]
+
+        # Check if the project's flowcell field contains "Universal-"
+        project_flowcell = summary_row["value"]["details"].get("flowcell", "")
+        is_universal = project_flowcell.startswith("Universal-")
+
+        reads_sequenced = 0
+        # 1 unit = 600 million reads - only show units for Universal projects
+        # For Universal projects, check if reads meet 90% of (units_ordered * 600M)
+        units_achieved = reads_sum / 600000000
+        reads_sequenced_meets_threshold = True  # Default for non-Universal projects
+
+        if is_universal:
+            units_ordered_str = summary_row["value"]["details"].get(
+                "sequence_units_ordered_(lanes)", ""
+            )
+            try:
+                units_ordered = float(units_ordered_str) if units_ordered_str else 0
+                if units_ordered > 0:
+                    expected_reads = units_ordered * 600000000
+                    threshold = expected_reads * 0.9
+                    reads_sequenced_meets_threshold = reads_sum >= threshold
+            except (ValueError, TypeError):
+                units_ordered = 0
+
+            reads_sequenced = str(reads_sum) + f" (~ {round(units_achieved, 2)} units)"
+        else:
+            reads_sequenced = str(reads_sum)
+
+        self.write(
+            json.dumps(
+                {
+                    "reads_sequenced": reads_sequenced,
+                    "reads_sequenced_meets_threshold": reads_sequenced_meets_threshold,
+                }
+            )
+        )
+
+
 class ProjectDataHandler(ProjectsBaseDataHandler):
     """Serves brief information of a given project.
 
@@ -641,53 +782,102 @@ class ProjectDataHandler(ProjectsBaseDataHandler):
         )
 
     def project_info(self, project, view_with_sources=False):
-        if view_with_sources:
-            view_adress = "project/summary_with_sources"
-        else:
-            view_adress = "project/summary"
+        view_adress = "summary_with_sources" if view_with_sources else "summary"
         # In this view, projects can only be closed or open, nothing else
-        view = self.application.projects_db.view(view_adress)["open", project]
-        if not view.rows:
-            view = self.application.projects_db.view(view_adress)["closed", project]
-        if not len(view.rows) == 1:
+        view_rows = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view=view_adress,
+            keys=[["open", project], ["closed", project]],
+        ).get_result()["rows"]
+        if not len(view_rows) == 1:
             return {}
 
-        summary_row = view.rows[0]
+        summary_row = view_rows[0]
         summary_row, field_sources = self.project_summary_data(summary_row)
 
-        date_view = self.application.projects_db.view(
-            "project/summary_dates", descending=True, group_level=1
-        )
-        date_result = date_view[[project + "ZZZZ"] : [project]]
+        date_result_rows = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view="summary_dates",
+            start_key=[project + "ZZZZ"],
+            end_key=[project],
+            descending=True,
+            group_level=1,
+        ).get_result()["rows"]
 
-        if date_result.rows:
-            for date_row in date_result.rows:
-                for date_type, date in date_row.value.items():
-                    summary_row.value[date_type] = date
+        if date_result_rows:
+            for date_row in date_result_rows:
+                for date_type, date in date_row["value"].items():
+                    summary_row["value"][date_type] = date
                     field_sources[date_type] = "StatusDB view project/summary_dates"
 
-        summary_row.value["_doc_id"] = summary_row.id
+        summary_row["value"]["_doc_id"] = summary_row["id"]
         field_sources["_doc_id"] = "StatusDB, inserted by Genomics Status (backend)"
-        summary_row.value["sourcedb_url"] = (
-            "https://" + self.settings["couch_server"].split("@")[1]
-        )
+        summary_row["value"]["sourcedb_url"] = self.settings["couch_url"]
         field_sources["sourcedb_url"] = "Genomics Status (backend)"
 
-        summary_row.value["field_sources"] = field_sources
+        summary_row["value"]["field_sources"] = field_sources
 
+        summary_row["value"]["reports"] = {}
         reports = {}
         type_to_name = {
             "_": "MultiQC",
             "_qc_": "QC MultiQC",
             "_pipeline_": "Pipeline MultiQC",
         }
-        for report_type in self.get_multiqc(project, read_file=False).keys():
+        for report_type in MultiQCReportHandler.get_multiqc(
+            self.application, project, read_file=False
+        ).keys():
             # Attempt to assign a name of the report type, otherwise default to the type itself
             report_name = type_to_name.get(report_type, report_type)
             reports[report_name] = f"/multiqc_report/{project}?type={report_type}"
-        summary_row.value["reports"] = reports
+        if reports:
+            summary_row["value"]["reports"] = {"multiqc": reports}
+        if ProjectSummaryReportHandler.get_summary_report(
+            self.application, project, read_file=False
+        ):
+            summary_row["value"]["reports"]["project_summary"] = True
+        sample_summary_reports = (
+            SingleCellSampleSummaryReportHandler.get_sample_summary_reports(
+                self.application, project
+            )
+        )
+        if sample_summary_reports:
+            group_summary_reports = {}
+            for report in sample_summary_reports:
+                # Match report names in the format <sample_id(projid_int)>_(<Method>_<(optional)>)_report.html/pdf
+                match = re.match(
+                    rf"^({project}_\d+)_([^_]+(_[^_]+)?)_report\.(pdf|html)", report
+                )
+                if match:
+                    sample_id = match.group(1)
+                    method = match.group(2)
+                    if sample_id not in group_summary_reports:
+                        group_summary_reports[sample_id] = {}
+                    group_summary_reports[sample_id][method] = report
+            summary_row["value"]["reports"]["sample_summary_reports"] = (
+                group_summary_reports
+            )
+        visium_reports = VisiumReportHandler.get_visium_reports(
+            self.application, project
+        )
+        if visium_reports:
+            summary_row["value"]["reports"]["visium_reports"] = visium_reports
 
-        return summary_row.value
+        # Get people assignments
+        people_assignments_view_result = self.application.cloudant.post_view(
+            db="people_assignments",
+            ddoc="current",
+            view="assignments",
+            key=project,
+        ).get_result()
+
+        summary_row["value"]["people_assigned"] = []
+        for people_row in people_assignments_view_result.get("rows", []):
+            summary_row["value"]["people_assigned"] = people_row["value"]
+
+        return summary_row["value"]
 
 
 class ProjectSamplesDataHandler(SafeHandler):
@@ -755,10 +945,16 @@ class ProjectSamplesDataHandler(SafeHandler):
 
     def list_samples(self, project):
         samples = OrderedDict()
-        sample_view = self.application.projects_db.view("project/samples")
-        result = sample_view[project]
+        sample_view_result = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view="samples",
+            key=project,
+        ).get_result()["rows"]
         # Not all projects (i.e Pending projects) have samples!
-        samples = result.rows[0].value if result.rows[0].value else {}
+        samples = (
+            sample_view_result[0]["value"] if sample_view_result[0]["value"] else {}
+        )
         output = OrderedDict()
         for sample, sample_data in sorted(samples.items(), key=lambda x: x[0]):
             sample_data = self.sample_data(sample_data, project, sample)
@@ -770,10 +966,14 @@ class ProjectSamplesDataHandler(SafeHandler):
         self.write(json.dumps(self.list_samples(project), default=dthandler))
 
     def sample_list(self, project):
-        sample_view = self.application.projects_db.view("project/samples")
-        result = sample_view[project]
+        sample_view_result = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view="samples",
+            key=project,
+        ).get_result()["rows"]
 
-        samples = result.rows[0].value
+        samples = sample_view_result[0]["value"]
         samples = OrderedDict(sorted(samples.items(), key=lambda x: x[0]))
         return samples
 
@@ -783,10 +983,14 @@ class FragAnImageHandler(SafeHandler):
 
     def get(self, project, sample, step):
         self.set_header("Content-type", "application/json")
-        sample_view = self.application.projects_db.view("project/frag_an_links")
-        result = sample_view[project]
+        sample_view_result = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view="frag_an_links",
+            key=project,
+        ).get_result()["rows"]
         try:
-            data = result.rows[0].value
+            data = sample_view_result[0]["value"]
         except TypeError:
             # can be triggered by the data.get().get() calls.
             self.write("no Fragment Analyzer image found")
@@ -808,10 +1012,14 @@ class CaliperImageHandler(SafeHandler):
 
     def get(self, project, sample, step):
         self.set_header("Content-type", "application/json")
-        sample_view = self.application.projects_db.view("project/caliper_links")
-        result = sample_view[project]
+        sample_view_result = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view="caliper_links",
+            key=project,
+        ).get_result()["rows"]
         try:
-            data = result.rows[0].value
+            data = sample_view_result[0]["value"]
         except TypeError:
             # can be triggered by the data.get().get() calls.
             raise tornado.web.HTTPError(404, reason="No caliper image found")
@@ -847,22 +1055,26 @@ class ImagesDownloadHandler(SafeHandler):
 
         name = ""
         if "frag_an" in type:
-            view = "project/frag_an_links"
+            view = "frag_an_links"
             if "libval" in type:
                 name = "LibraryValidationFragmentAnalyser"
             elif "intial_qc" in type:
                 name = "InitialQCFragmentAnalyser"
         else:
-            view = "project/caliper_links"
+            view = "caliper_links"
             if "libval" in type:
                 name = "LibraryValidationCaliper"
             elif "initial_qc" in type:
                 name = "InitialQCCaliper"
 
-        sample_view = self.application.projects_db.view(view)
-        result = sample_view[project]
+        sample_view_result = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="project",
+            view=view,
+            key=project,
+        ).get_result()["rows"]
         try:
-            data = result.rows[0].value
+            data = sample_view_result[0]["value"]
         except TypeError:
             # can be triggered by the data.get().get() calls.
             raise tornado.web.HTTPError(404, reason="No caliper image found")
@@ -935,11 +1147,48 @@ class ProjectSamplesOldHandler(SafeHandler):
 
     def get(self, project):
         t = self.application.loader.load("project_samples_old.html")
-        worksets_view = self.application.worksets_db.view(
-            "project/ws_name", descending=True
+        worksets_view = self.application.cloudant.post_view(
+            db="worksets",
+            ddoc="project",
+            view="ws_name",
+            key=project,
+        ).get_result()["rows"]
+
+        reports = {}
+        multiqc = list(
+            MultiQCReportHandler.get_multiqc(
+                self.application, project, read_file=False
+            ).keys()
         )
-        # to check if multiqc report exists (get_multiqc() is defined in util.BaseHandler)
-        multiqc = list(self.get_multiqc(project).keys())
+        if multiqc:
+            reports["multiqc"] = multiqc
+        if ProjectSummaryReportHandler.get_summary_report(
+            self.application, project, read_file=False
+        ):
+            reports["project_summary"] = True
+        sample_summary_reports = (
+            SingleCellSampleSummaryReportHandler.get_sample_summary_reports(
+                self.application, project
+            )
+        )
+        if sample_summary_reports:
+            group_summary_reports = {}
+            for report in sample_summary_reports:
+                # Match report names in the format <sample_id(projid_int)>_(<Method>_<(optional)>)_report.html/pdf
+                match = re.match(
+                    rf"^({project}_\d+)_([^_]+(_[^_]+)?)_report\.(pdf|html)", report
+                )
+                if match:
+                    sample_id = match.group(1)
+                    method = match.group(2)
+                    if sample_id not in group_summary_reports:
+                        group_summary_reports[sample_id] = {}
+                    group_summary_reports[sample_id][method] = report
+            reports["sample_summary_reports"] = group_summary_reports
+        if visium_reports := VisiumReportHandler.get_visium_reports(
+            self.application, project
+        ):
+            reports["visium_reports"] = visium_reports
         self.write(
             t.generate(
                 gs_globals=self.application.gs_globals,
@@ -949,8 +1198,8 @@ class ProjectSamplesOldHandler(SafeHandler):
                 columns_sample=self.application.genstat_defaults.get("sample_columns"),
                 lims_dashboard_url=self.application.settings["lims_dashboard_url"],
                 prettify=prettify_css_names,
-                worksets=worksets_view[project],
-                multiqc=multiqc,
+                worksets=worksets_view,
+                reports=reports,
                 lims_uri=BASEURI,
             )
         )
@@ -1001,20 +1250,33 @@ class LinksDataHandler(SafeHandler):
     """
 
     def get(self, project):
-        self.set_header("Content-type", "application/json")
-        p = Project(lims, id=project)
-        p.get(force=True)
-
-        links = json.loads(p.udf["Links"]) if "Links" in p.udf else {}
+        links_doc = {}
+        try:
+            links_doc = self.application.cloudant.get_document(
+                db="gs_links", doc_id=project
+            ).get_result()
+        except ApiException as e:
+            if e.message == "not_found":
+                pass
+        links = links_doc.get("links", {})
 
         # Sort by descending date, then hopefully have deviations on top
         sorted_links = OrderedDict()
+        grouped_links = {}
         for k, v in sorted(links.items(), key=lambda t: t[0], reverse=True):
             sorted_links[k] = v
         sorted_links = OrderedDict(
             sorted(sorted_links.items(), key=lambda k: k[1]["type"])
         )
-        self.write(sorted_links)
+
+        for link_type in ["project_folder", "deviation", "other"]:
+            grouped_links[link_type] = {
+                k: v for k, v in sorted_links.items() if v["type"].lower() == link_type
+            }
+
+        grouped_links["old_links"] = sorted_links
+        self.set_header("Content-type", "application/json")
+        self.write(grouped_links)
 
     def post(self, project):
         user = self.get_current_user()
@@ -1027,23 +1289,82 @@ class LinksDataHandler(SafeHandler):
             self.set_status(400)
             self.finish("<html><body>Link title and type is required</body></html>")
         else:
-            p = Project(lims, id=project)
-            p.get(force=True)
-            links = json.loads(p.udf["Links"]) if "Links" in p.udf else {}
-            links[str(datetime.datetime.now())] = {
-                "user": user.name,
-                "email": user.email,
-                "type": a_type,
-                "title": title,
-                "url": url,
-                "desc": desc,
-            }
-            p.udf["Links"] = json.dumps(links)
-            p.put()
+            links_doc = {}
+            links = {}
+            try:
+                links_doc = self.application.cloudant.get_document(
+                    db="gs_links", doc_id=project
+                ).get_result()
+            except ApiException as e:
+                if e.message == "not_found":
+                    links_doc["_id"] = project
+                    links_doc["links"] = {}
+            links = links_doc.get("links", {})
+            links.update(
+                {
+                    str(datetime.datetime.now()): {
+                        "user": user.name,
+                        "email": user.email,
+                        "type": a_type,
+                        "title": title,
+                        "url": url,
+                        "desc": desc,
+                    }
+                }
+            )
+            links_doc["links"] = links
+
+            response = self.application.cloudant.post_document(
+                db="gs_links", document=links_doc
+            ).get_result()
+
+            if not response.get("ok"):
+                self.set_status(500)
+                return
+
             self.set_status(200)
             # ajax cries if it does not get anything back
             self.set_header("Content-type", "application/json")
             self.finish(json.dumps(links))
+
+    def delete(self, project):
+        link_id = json.loads(self.request.body)["link_id"]
+        if not link_id:
+            self.set_status(400)
+            self.finish("<html><body>Link id is required</body></html>")
+        else:
+            links_doc = {}
+            links = {}
+            try:
+                links_doc = self.application.cloudant.get_document(
+                    db="gs_links", doc_id=project
+                ).get_result()
+            except ApiException as e:
+                if e.message == "not_found":
+                    pass
+            links = links_doc.get("links", {})
+            if link_id in links:
+                del links[link_id]
+                links_doc["links"] = links
+                # If there are no links left, delete the document instead
+                if links:
+                    response = self.application.cloudant.post_document(
+                        db="gs_links", document=links_doc
+                    ).get_result()
+                else:
+                    response = self.application.cloudant.delete_document(
+                        db="gs_links", doc_id=project, rev=links_doc["_rev"]
+                    ).get_result()
+                if not response.get("ok"):
+                    self.set_status(500)
+                    return
+                self.set_status(200)
+                # ajax cries if it does not get anything back
+                self.set_header("Content-type", "application/json")
+                self.finish(json.dumps(links))
+            else:
+                self.set_status(404)
+                self.finish("<html><body>Link id not found</body></html>")
 
 
 class ProjectTicketsDataHandler(SafeHandler):
@@ -1125,9 +1446,14 @@ class RecCtrlDataHandler(SafeHandler):
     def get(self, project_id):
         sample_data = {}
         # changed from projects due to view timing out with os_process_error
-        v = self.application.projects_db.view("samples/rec_ctrl_view")
-        for row in v[project_id]:
-            sample_data.update(row.value)
+        view_result = self.application.cloudant.post_view(
+            db="projects",
+            ddoc="samples",
+            view="rec_ctrl_view",
+            key=project_id,
+        ).get_result()["rows"]
+        for row in view_result:
+            sample_data.update(row["value"])
 
         t = self.application.loader.load("rec_ctrl_view.html")
         self.write(
@@ -1161,9 +1487,14 @@ class ProjectRNAMetaDataHandler(SafeHandler):
 
     def get(self, project_id):
         data = "{}"
-        view = self.application.analysis_db.view("reports/RNA_report")
-        for row in view[project_id]:
-            data = json.dumps(row.value)
+        view_result = self.application.cloudant.post_view(
+            db="analysis",
+            ddoc="reports",
+            view="RNA_report",
+            key=project_id,
+        ).get_result()["rows"]
+        for row in view_result:
+            data = json.dumps(row["value"])
 
         self.set_status(200)
         self.set_header("Content-type", "application/json")
@@ -1177,45 +1508,49 @@ class PrioProjectsTableHandler(SafeHandler):
 
     def get(self):
         projects = {}
-        def_dates_rec_ctrl = {"days_recep_ctrl": ["open_date", "queued"]}
+        def_dates_rec_ctrl = {
+            k[1]: v for k, v in stage_definitions.items() if k[1] == "days_recep_ctrl"
+        }
         # dates in order
+        dates_ongoing = [
+            "days_prep_start",
+            "days_prep",
+            "days_seq_start",
+            "days_seq",
+            "days_analysis",
+            "days_data_delivery",
+            "days_close",
+        ]
         def_dates_ongoing = {
-            "days_prep_start": ["queued", "library_prep_start"],
-            "days_prep": ["library_prep_start", "qc_library_finished"],
-            "days_seq_start": [
-                ["qc_library_finished", "queued"],
-                "sequencing_start_date",
-            ],
-            "days_seq": ["sequencing_start_date", "all_samples_sequenced"],
-            "days_analysis": [
-                "all_samples_sequenced",
-                "best_practice_analysis_completed",
-            ],
-            "days_data_delivery": ["all_samples_sequenced", "all_raw_data_delivered"],
-            "days_close": ["all_raw_data_delivered", "close_date"],
+            k[1]: v for k, v in stage_definitions.items() if k[1] in dates_ongoing
         }
 
         statuses = ["ongoing", "reception control"]
         view_calls = []
 
-        view = self.application.projects_db.view(
-            "project/summary_status", descending=True
-        )
         for status in statuses:
-            view_calls.append(view[[status, "Z"] : [status, ""]])
+            view = self.application.cloudant.post_view(
+                db="projects",
+                ddoc="project",
+                view="summary_status",
+                start_key=[status, "Z"],
+                end_key=[status, ""],
+                descending=True,
+            ).get_result()["rows"]
+            view_calls.append(view)
         for row in itertools.chain.from_iterable(view_calls):
             proj_id_name_lib = (
-                row.value["project_name"]
+                row["value"]["project_name"]
                 + " ("
-                + row.key[1]
+                + row["key"][1]
                 + ")"
                 + "| "
-                + row.value["details"].get("library_construction_method", "-")
+                + row["value"]["details"].get("library_construction_method", "-")
             )
-            proj_val = row.value
+            proj_val = row["value"]
             for date_type, date in proj_val["summary_dates"].items():
                 proj_val[date_type] = date
-            if row.key[0] == "ongoing":
+            if row["key"][0] == "ongoing":
                 for k, v in proj_val["project_summary"].items():
                     proj_val[k] = v
 
@@ -1231,7 +1566,7 @@ class PrioProjectsTableHandler(SafeHandler):
                 )
                 projects[proj_id_name_lib] = {key: date_val}
 
-            if row.key[0] == "ongoing":
+            if row["key"][0] == "ongoing":
                 for key, value in def_dates_ongoing.items():
                     if key == "days_seq_start":
                         if is_fin_lib:

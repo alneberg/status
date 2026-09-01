@@ -1,13 +1,18 @@
 import json
 import os
+import re
 import sys
 import urllib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+import psycopg2
 import requests
 import tornado.web
 import tornado.websocket
 from dateutil import parser
+from jwcrypto import jwk, jwt
+from jwcrypto.common import JWException
+from jwcrypto.jws import InvalidJWSSignature
 
 #########################
 #  Useful misc handlers #
@@ -30,6 +35,9 @@ ERROR_CODES = {
     504: "Gateway Timeout",
     511: "Network Authentication Required",
 }
+
+# Allowed: a string of max 25 with letters (upper/lower), digits, underscore (_), hyphen (-)
+key_id_regex = r"^[a-zA-Z0-9_\-\.]{1,25}$"
 
 
 class User:
@@ -62,6 +70,10 @@ class User:
     def is_proj_coord(self):
         return "proj_coord" in self.roles
 
+    @property
+    def is_api_user(self):
+        return "api_user" in self.roles
+
 
 class BaseHandler(tornado.web.RequestHandler):
     """Base Handler. Handlers should not inherit from this
@@ -90,7 +102,7 @@ class BaseHandler(tornado.web.RequestHandler):
                 "proj_coord",
             ]
             email = "Testing User!"
-        else:
+        elif self.get_secure_cookie("user"):
             name = (
                 str(self.get_secure_cookie("user"), "utf-8")
                 if self.get_secure_cookie("user")
@@ -110,6 +122,52 @@ class BaseHandler(tornado.web.RequestHandler):
                 if self.get_secure_cookie("email")
                 else None
             )
+        else:
+            # Check for API user through JWT in Authorization header
+            # Signed JWT with ES256 expected
+            auth_header = self.request.headers.get("Authorization", None)
+            if not auth_header or not auth_header.startswith("Bearer "):
+                return None
+
+            token = auth_header.split(" ", 1)[1]
+            try:
+                token_obj = jwt.JWT(jwt=token)
+                header = token_obj.token.jose_header
+                # Get key ID from token header, same user can have multiple keys
+                key_id = header.get("kid")
+                if not key_id:
+                    return None
+            except Exception:
+                return None
+
+            if not re.match(key_id_regex, key_id):
+                return None
+
+            keys = self.application.cloudant.post_view(
+                db="gs_users",
+                ddoc="authorized",
+                view="api_users",
+                key=key_id,
+            ).get_result()["rows"]
+            if not keys:
+                return None
+
+            public_key = jwk.JWK.from_pem(keys[0]["value"]["public_key"].encode())
+            owner = keys[0]["value"].get("owner", "Unknown")
+            try:
+                verified_payload = jwt.JWT(jwt=token, key=public_key)
+                claims = json.loads(verified_payload.claims)
+                if claims["exp"] < datetime.now(timezone.utc).timestamp():
+                    return None
+                # If 'sub' claim is present, it must match owner
+                if "sub" in claims and claims["sub"] != owner:
+                    return None
+                name = owner
+                email = None
+                roles = ["api_user"]
+            except (InvalidJWSSignature, JWException):
+                return None
+
         user = User(name, email, roles)
         if user.name:
             return user
@@ -159,50 +217,40 @@ class BaseHandler(tornado.web.RequestHandler):
                 )
             )
 
-    def get_multiqc(self, project_id, read_file=True):
-        """
-        Getting multiqc reports for requested project from the filesystem
-        Returns a string containing html if report exists, otherwise None
-        If read_file is false, the value of the dictionary will be the path to the file
-        """
-        view = self.application.projects_db.view("project/id_name_dates")
-        rows = view[project_id].rows
-        project_name = ""
-        multiqc_reports = {}
-        # get only the first one
-        for row in rows:
-            project_name = row.value.get("project_name", "")
-            break
-
-        if project_name:
-            multiqc_path = self.application.multiqc_path or ""
-            for type in ["_", "_qc_", "_pipeline_"]:
-                multiqc_name = f"{project_name}{type}multiqc_report.html"
-                multiqc_file_path = os.path.join(multiqc_path, multiqc_name)
-                if os.path.exists(multiqc_file_path):
-                    if read_file:
-                        with open(multiqc_file_path, encoding="utf-8") as multiqc_file:
-                            html = multiqc_file.read()
-                            multiqc_reports[type] = html
-                    else:
-                        multiqc_reports[type] = multiqc_file_path
-        return multiqc_reports
-
     @staticmethod
     def get_user_details(app, user_email):
         user_details = {}
         if user_email == "Testing User!":
-            user_email = app.settings.get("username", None) + "@scilifelab.se"
+            user_email = app.settings.get("couch_username", None) + "@scilifelab.se"
             user_details = {
                 "userpreset": {"Hardcoded One": {}}
             }  # Just to show something locally
-        rows = app.gs_users_db.view("authorized/users", include_docs=True)[
-            user_email
-        ].rows
+        rows = app.cloudant.post_view(
+            db="gs_users",
+            ddoc="authorized",
+            view="users",
+            key=user_email,
+            include_docs=True,
+        ).get_result()["rows"]
         if len(rows) == 1:
-            user_details = dict(rows[0].doc)
+            user_details = dict(rows[0]["doc"])
 
         return user_details
+
+    def get_login_url(self):
+        # If API client (likely uses JWT), don't redirect — return 401 instead
+        auth_header = self.request.headers.get("Authorization", None)
+        if auth_header and auth_header.startswith("Bearer "):
+            return "/unauthorized"
+        return super().get_login_url()
+
+    def redirect(self, url, *args, **kwargs):
+        # If we're trying to redirect to the dummy URL, return 401 instead
+        if url.split("?")[0] == self.get_login_url():
+            self.set_status(401)
+            self.finish(json.dumps({"error": ERROR_CODES[401], "status_code": 401}))
+        else:
+            super().redirect(url, *args, **kwargs)
 
 
 class SafeHandler(BaseHandler):
@@ -247,27 +295,31 @@ class MainHandler(UnsafeHandler):
         t = self.application.loader.load("index.html")
         user = self.get_current_user()
         # Avoids pulling all historic data by assuming we have less than 30 NAS:es
-        view = self.application.server_status_db.view(
-            "nases/by_timestamp", descending=True, limit=30
-        )
-        latest = max([parser.parse(row.key) for row in view.rows])
+        view_rows = self.application.cloudant.post_view(
+            db="server_status",
+            ddoc="nases",
+            view="by_timestamp",
+            descending=True,
+            limit=30,
+        ).get_result()["rows"]
+        latest = max([parser.parse(row["key"]) for row in view_rows])
         # assuming that status db is not being updated more often than every 5 minutes
         reduced_rows = [
             row
-            for row in view.rows
-            if latest - parser.parse(row.key) <= timedelta(minutes=5)
+            for row in view_rows
+            if latest - parser.parse(row["key"]) <= timedelta(minutes=5)
         ]
         instruments = self.application.server_status["instruments"]
         server_status = {}
         for row in reduced_rows:
-            server = row.value.get("name")
+            server = row["value"].get("name")
             if server is None:
                 continue
             if server not in server_status:
-                server_status[server] = row.value
+                server_status[server] = row["value"]
                 server_status[server]["instrument"] = instruments.get(server, "-")
                 used_percentage = float(
-                    row.value.get("used_percentage", "0").replace("%", "")
+                    row["value"].get("used_percentage", "0").replace("%", "")
                 )
                 if used_percentage > 80:
                     server_status[server]["css_class"] = "q-danger"
@@ -336,39 +388,6 @@ class DataHandler(UnsafeHandler):
         self.write(json.dumps({"api": api, "pages": pages}))
 
 
-class UpdatedDocumentsDatahandler(SafeHandler):
-    """Serves a list of references to the last updated documents in the
-    databases Status gets data from.
-
-    Specify to get the <n> latest items by ?items=<n>.
-
-    Loaded through /api/v1/last_updated
-    """
-
-    def get(self):
-        num_items = int(self.get_argument("items", 25))
-        self.set_header("Content-type", "application/json")
-        self.write(json.dumps(self.list_updated(num_items)))
-
-    def list_updated(self, num_items=25):
-        last = []
-
-        view = self.application.projects_db.view(
-            "time/last_updated", limit=num_items, descending=True
-        )
-        for doc in view:
-            last.append((doc.key, doc.value, "Project information"))
-
-        view = self.application.flowcells_db.view(
-            "time/last_updated", limit=num_items, descending=True
-        )
-        for doc in view:
-            last.append((doc.key, doc.value, "Flowcell information"))
-
-        last = sorted(last, key=lambda tr: tr[0], reverse=True)
-        return last[:num_items]
-
-
 class NoCacheStaticFileHandler(tornado.web.StaticFileHandler):
     """Serves up static files without any tornado caching.
     https://gist.github.com/omarish/5499385
@@ -399,6 +418,29 @@ class LastPSULRunHandler(SafeHandler):
         self.write(json.dumps(response))
 
 
+class LIMSQueryBaseHandler(SafeHandler):
+    """Base handler for LIMS queries."""
+
+    def _get_lims_cursor(self):
+        """Return a cursor to the LIMS database."""
+        connection = psycopg2.connect(
+            user=self.application.lims_conf["username"],
+            host=self.application.lims_conf["url"],
+            database=self.application.lims_conf["db"],
+            password=self.application.lims_conf["password"],
+        )
+        return connection.cursor()
+
+    def get_query_result(self, query, params=None):
+        """Execute a query and return the results as a list of dicts."""
+        cursor = self._get_lims_cursor()
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+        return cursor.fetchall()
+
+
 ########################
 # Other useful classes #
 ########################
@@ -424,11 +466,18 @@ class GoogleUser:
             self.display_name = info.get("displayName", "")
             self.emails = [email["value"] for email in info.get("emails")]
 
-    def is_authorized(self, user_view):
+    def is_authorized(self, db_conn):
         """Checks that the user is actually authorised to use genomics-status."""
         authenticated = False
         for email in self.emails:
-            if user_view[email]:
+            user_view = db_conn.post_view(
+                db="gs_users",
+                ddoc="authorized",
+                view="users",
+                key=email,
+                reduce=False,
+            ).get_result()["rows"]
+            if user_view:
                 self.valid_email = email
                 authenticated = True
         return authenticated
